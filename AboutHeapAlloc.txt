@@ -1,0 +1,176 @@
+typedef struct tagHEAP
+{
+    DWORD_PTR        unknown1[2];
+    DWORD            unknown2[2];
+    DWORD_PTR        unknown3[4];
+    DWORD            unknown4;
+    DWORD_PTR        unknown5[2];
+    DWORD            unknown6[3];
+    DWORD_PTR        unknown7[2];
+    /* For Vista through 10, 'flags' is at offset 0x40 (x86) / 0x70 (x64) */
+    DWORD            flags;         /* Heap flags */
+    DWORD            force_flags;   /* Forced heap flags for debugging */
+    SUBHEAP          subheap;       /* First sub-heap */
+    struct list      entry;         /* Entry in process heap list */
+    struct list      subheap_list;  /* Sub-heap list */
+    struct list      large_list;    /* Large blocks list */
+    SIZE_T           grow_size;     /* Size of next subheap for growing heap */
+    DWORD            magic;         /* Magic number */
+    DWORD            pending_pos;   /* Position in pending free requests ring */
+    ARENA_INUSE    **pending_free;  /* Ring buffer for pending free requests */
+    RTL_CRITICAL_SECTION critSection; /* Critical section for serialization */
+    FREE_LIST_ENTRY *freeList;      /* Free lists */
+} HEAP;
+
+/***********************************************************************
+ *           HEAP_CreateFreeBlock
+ *
+ * Create a free block at a specified address. 'size' is the size of the
+ * whole block, including the new arena.
+ */
+static void HEAP_CreateFreeBlock( SUBHEAP *subheap, void *ptr, SIZE_T size )
+{
+    ARENA_FREE *pFree;
+    char *pEnd;
+    BOOL last;
+    DWORD flags = subheap->heap->flags;
+
+    /* Create a free arena */
+    mark_block_uninitialized( ptr, sizeof(ARENA_FREE) );
+    pFree = ptr;
+    pFree->magic = ARENA_FREE_MAGIC;
+
+    /* If debugging, erase the freed block content */
+
+    pEnd = (char *)ptr + size;
+    if (pEnd > (char *)subheap->base + subheap->commitSize)
+        pEnd = (char *)subheap->base + subheap->commitSize;
+    if (pEnd > (char *)(pFree + 1)) mark_block_free( pFree + 1, pEnd - (char *)(pFree + 1), flags );
+
+    /* Check if next block is free also */
+
+    if (((char *)ptr + size < (char *)subheap->base + subheap->size) &&
+        (*(DWORD *)((char *)ptr + size) & ARENA_FLAG_FREE))
+    {
+        /* Remove the next arena from the free list */
+        ARENA_FREE *pNext = (ARENA_FREE *)((char *)ptr + size);
+        list_remove( &pNext->entry );
+        size += (pNext->size & ARENA_SIZE_MASK) + sizeof(*pNext);
+        mark_block_free( pNext, sizeof(ARENA_FREE), flags );
+    }
+
+    /* Set the next block PREV_FREE flag and pointer */
+
+    last = ((char *)ptr + size >= (char *)subheap->base + subheap->size);
+    if (!last)
+    {
+        DWORD *pNext = (DWORD *)((char *)ptr + size);
+        *pNext |= ARENA_FLAG_PREV_FREE;
+        mark_block_initialized( (ARENA_FREE **)pNext - 1, sizeof( ARENA_FREE * ) );
+        *((ARENA_FREE **)pNext - 1) = pFree;
+    }
+
+    /* Last, insert the new block into the free list */
+
+    pFree->size = size - sizeof(*pFree);
+    HEAP_InsertFreeBlock( subheap->heap, pFree, last );
+}
+
+static SUBHEAP *HEAP_CreateSubHeap( HEAP *heap, LPVOID address, DWORD flags,
+                                    SIZE_T commitSize, SIZE_T totalSize )
+{
+
+    /* allocate the memory block */
+    if (NtAllocateVirtualMemory( NtCurrentProcess(), &address, 0, &totalSize,
+                                    MEM_RESERVE, get_protection_type( flags ) ))
+    {
+        WARN("Could not allocate %08lx bytes\n", totalSize );
+        return NULL;
+    }
+    if (NtAllocateVirtualMemory( NtCurrentProcess(), &address, 0,
+                                    &commitSize, MEM_COMMIT, get_protection_type( flags ) ))
+
+    heap = address;
+    heap->flags         = flags;
+    heap->magic         = HEAP_MAGIC;
+    heap->grow_size     = max( HEAP_DEF_SIZE, totalSize );
+    list_init( &heap->subheap_list );
+    list_init( &heap->large_list );
+
+    subheap = &heap->subheap;
+    subheap->base       = address;
+    subheap->heap       = heap;
+    subheap->size       = totalSize;
+    subheap->min_commit = commitSize;
+    subheap->commitSize = commitSize;
+    subheap->magic      = SUBHEAP_MAGIC;
+    subheap->headerSize = ROUND_SIZE( sizeof(HEAP) );
+    list_add_head( &heap->subheap_list, &subheap->entry );
+
+    /* Build the free lists */
+
+    heap->freeList = (FREE_LIST_ENTRY *)((char *)heap + subheap->headerSize);
+    subheap->headerSize += HEAP_NB_FREE_LISTS * sizeof(FREE_LIST_ENTRY);
+    list_init( &heap->freeList[0].arena.entry );
+    for (i = 0, pEntry = heap->freeList; i < HEAP_NB_FREE_LISTS; i++, pEntry++)
+    {
+        pEntry->arena.size = 0 | ARENA_FLAG_FREE;
+        pEntry->arena.magic = ARENA_FREE_MAGIC;
+        if (i) list_add_after( &pEntry[-1].arena.entry, &pEntry->arena.entry );
+    }
+
+    。。。
+    HEAP_CreateFreeBlock( subheap, (LPBYTE)subheap->base + subheap->headerSize,
+    subheap->size - subheap->headerSize );
+
+    return subheap;
+}
+
+
+HANDLE WINAPI RtlCreateHeap( ULONG flags, PVOID addr, SIZE_T totalSize, SIZE_T commitSize,
+    PVOID unknown, PRTL_HEAP_DEFINITION definition )
+{
+
+    SUBHEAP *subheap;
+
+    /* Allocate the heap block */
+
+    if (!totalSize)
+    {
+        totalSize = HEAP_DEF_SIZE;
+        flags |= HEAP_GROWABLE;
+    }
+
+    if (!(subheap = HEAP_CreateSubHeap( NULL, addr, flags, commitSize, totalSize ))) return 0;
+    ...
+    return subheap->heap;
+
+}
+
+
+1. RtlCreateHeap创建Heap
+    1. NtAllocateVirtualMemory申请一定大小(默认0x110000)的地址Address用作Heap
+    2. 接着给分配的地址Address初始化
+        heap = address;
+        初始化一个Heap数据结构出来
+        subheap->headerSize = ROUND_SIZE( sizeof(HEAP) );
+        heap->freeList = (FREE_LIST_ENTRY *)((char *)heap + subheap->headerSize);
+        在address处分配初始化Heap之后的空间用来初始化heap->freeList
+        subheap->headerSize += HEAP_NB_FREE_LISTS * sizeof(FREE_LIST_ENTRY);
+        接着给Heap的headersize再加上HEAP_NB_FREE_LISTS * sizeof(FREE_LIST_ENTRY)个entry
+    3. HEAP_NB_FREE_LISTS（33）个基本没什么用，后面会在34个的位置开始分配空间
+    4. 最后一个FREE_ARENA的大小为0x110000 - 前面HEAP+33个entry占用的大小
+
+2. RtlAllocateHeap分配heap
+    1. 如果是HEAP_MIN_LARGE_BLOCK_SIZE(0x7f000), 通过NtAllocateVirtualMemory(mmap)分配
+    2. 否则从最后的一个FREE_ARENA的size中分配
+
+3. NtAllocateVirtualMemory在虚拟空间中reserve和commit虚拟内存
+    虚拟空间的构建在loader加载exe时候开始创建
+    创建进程的时候，在虚拟内存上初始化PEB,TEB,环境变量，代码段等。创建线程，还要设置ESP,EIP
+    随后开始线程调度，保存老的线程寄存器内容，还原新的线程寄存器内容，然后开始在指定的ESP位置，执行EIP
+
+4. 新的线程
+    NtAllocateVirtualMemory分配线程栈空间，给TEB设置ESP,EIP
+    等待线程调度
+
