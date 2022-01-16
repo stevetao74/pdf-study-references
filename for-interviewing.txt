@@ -216,7 +216,7 @@
 
             5. Prototypes不需要创建Ctreator子类, 但是通常要求一个针对Product类的Initialize操作。Creator使用Initialize来初始化对象。Factory不需要
 
-        3. Prototypes (paragraph 3.4)
+        4. Prototypes (paragraph 3.4)
 
             client                                      Prototype
                                                             Clone()
@@ -224,10 +224,792 @@
                                                             clone()                 clone()
                                                                 return copy of self     return copy of self
 
-            
+            class Door:public MapSite{
+                public:
+                    Door();
+                    Door(const Door&);
 
-    2. 结构型模式 // 处理类或对象的组合
-    3. 行为模式
+                    virtual void Initialize(Room* Room*);
+                    virtual Door* Clone() const;
+                private:
+                    Room* _room1;
+                    Room* _room2;
+            };
+
+            Door::Door(const Door& other){
+                _room1 = other._room1;
+                _room2 = other._room2;
+            }
+
+            void Door::Initialize(Room *r1, Room *r2){
+                _room1 = r1;
+                _room2 = r2;
+            }
+
+            void Door::Clone() const{
+                return new Door(*this);
+            }
+
+            class MazePrototypeFactory : public MazeFactory{
+                public:
+                    MazePrototypeFactory(Maze*, Wall*, Room*, Door*);
+
+                    virtual Maze* MakeMaze() const;
+                    virtual Room* MakeRoom(int) const;
+                    virtual Wall* MakeWall() const;
+                    virtual Door* MakeDoor(Room*, Room*) const;
+                
+                private:
+                    Maze* _prototypeMaze;
+                    Room* _prototypeRoom;
+                    Wall* _prototypeWall;
+                    Door* _prototypeDoor;
+            };
+
+            MazePrototypeFactory::MazePrototypeFactory(Maze* m, Wall* w, Room* r, Door* d)
+            {
+                _prototypeMaze = m;
+                _prototypeRoom = r;
+                _prototypeWall = w;
+                _prototypeDoor = d;
+            }
+
+            Wall* MazePrototypeFactory::MakeWall() const
+            {
+                return _prototypeWall->Clone();
+            }
+
+            Wall* MazePrototypeFactory::MakeRoom(Room* r1, Room* r2) const
+            {
+                Door *door = _prototypeDoor->Clone();
+                door->Initialize(r1, r2);
+                return door;
+            }
+
+            MazeGame game;
+            MazePrototypeFactory simpleMazeFactory(new Maze, new Wall, new Room, new Door);
+
+            Maze *maze = game.CreateMaze(simpleMazeFactory);
+
+        5. singleton (paragraph 3.5)
+            class Singleton{
+                public:
+                    static Singleton* Instance();
+                protected:
+                    Singleton();
+                private:
+                    static Singleton* _instance;
+            };
+
+            Singleton* Singleton::_instance = 0;
+
+            Singleton* Singleton::Instance()
+            {
+                if (_instance == 0)
+                    _instance = new Singleton;
+                return _instance;
+            }
+
+            对于多种类型的子类创建：
+            Singleton* Singleton::Instance()
+            {
+                if (_instance == 0)
+                    _instance = new Singleton;
+                else{
+                    char *sz = getenv("MAZESTYLE");
+                    
+                    if (!strcmp(sz, "bombed"))
+                    {
+                        _instance = new BombedMazeFactory;
+                    }else if (!strcmp(sz, "enchanted"))
+                    {
+                        _instance = new EnchantedMazeFactory;
+                    }
+                }
+                return _instance;
+            }
+
+    2. 结构型模式 // 处理类或对象的组合 (paragraph 4)
+        · 涉及如何组合类和对象以获得更大的结构
+
+        1. ADAPTER (paragraph 4.1)
+            · 别名: 包装器Wrapper
+            · 意图: 将一个类的接口转换成客户希望的另外一个接口
+            · 结构(paragraph 4.1.5)
+                1. 多继承
+                    client -> Target                Adaptee
+                                request()               SpecifiedRequest()
+                                    ↑                     ↑
+                                            Adapter
+                                                request()
+                                                    Adaptee::SpecifiedRequest()
+
+                2. 对象组合
+                    client -> Target                Adaptee
+                                request()               SpecifiedRequest()
+                                    ↑                     ↑
+                                            Adapter
+                                                Adaptee adaptee;
+                                                request()
+                                                    adaptee.SpecifiedRequest()
+
+                原有的类Target，原有的接口:request()
+                新的类Adaptee, 新的接口:SpecifiedRequest()
+                Adapter同时继承两个类或者内含新类的实例，经由原来的类的接口调用到新的类或者对象的接口
+
+            代码示例：
+                1. 多继承
+                    class Shape{
+                        public:
+                            Shape();
+                            virtual void BoundingBox();
+                            virtual Manipulator* CreateManipulator();
+                    };
+
+                    class TextView{
+                        public:
+                            TextView();
+                            void GetOrigin();
+                            void GetExtent();
+                            virtual bool IsEmpty();
+                    };
+
+                    // adapter 公开继承原有的接口，私有继承新接口（只能调用新类提供的函数访问私有变量）
+                    class TextShape: public Shape, private TextView{
+                        public:
+                            TextShape();
+                            virtual void BoundingBox();
+                            virtual Manipulator* CreateManipulator();
+                            virtual bool IsEmpty();
+                    };
+
+                    void TextShape::BoundingBox(){
+                        GetOrigin(); // 老接口调用新接口
+                        GetExtent();
+                    }
+
+                    bool TextShape::IsEmpty(){
+                        return TextView::IsEmpty(); // 显示调用新接口
+                    }
+
+                    Manipulator* TextShape::CreateManipulator(){
+                        return new TextManipulator(this);
+                    }
+
+                2. 类和对象组合
+                    class TextShape:public Shape{
+                        public:
+                            TextShape(TextView*);
+                            virtual void BoundingBox();
+                            virtual Manipulator* CreateManipulator();
+                            virtual bool IsEmpty();
+                        private:
+                            TextView* _text; // 内含新类对象
+                    };
+
+                    void TextShape::BoundingBox(){
+                        _text->GetOrigin(); // 老接口调用新接口
+                        _text->GetExtent();
+                    }
+
+                    bool TextShape::IsEmpty(){
+                        return _text->IsEmpty(); // 显示调用新接口
+                    }
+
+            · 相关模式 (paragraph 4.1.12)
+                Bridge, Decorator, Proxy 
+
+        2. BRIDGE (paragraph 4.2)
+            · 意图
+                将抽象部分和实现部分分离，使他们可以独立的变化
+            · 别名
+                Handle/Body
+            · 代码示例：
+                class Window{
+                    public:
+
+                    protected:
+                        WindowsImp *GetWindowImp(){
+                            if (_imp == 0){
+                                _imp = WindowsSystemFactory::Instance()->MakeWindowImp();
+                            }
+                            return _imp;
+                        }
+                    
+                    private:
+                        WindowsImp *_imp;
+                };
+
+                class WindowsImp{ //通用的抽象接口
+                    public:
+                };
+
+                class XWindowImp:public WindowsImp{}
+                class PMWindowImp:public WindowsImp{} // 具体的实现Imp接口
+
+                class ApplicationWindow:public Window{
+                    // 公开继承带有基本操作的类
+                };
+
+                class IconWindow:public Window{
+                    // 公开继承带有基本操作的类
+                    public:
+                        virtual void DrawContents(){
+                            // 获取windowsImp类中的接口
+                            WindowsImp *imp = GetWindowImp(); // 使用Abstract Factory生成需要的Imp接口
+                            if (imp!=0)
+                            {
+                                imp->DeviceBitmap();
+                            }
+                        }
+                };
+            · 相关模式
+                Abstract Factory可以用来创建和配置一个特定的bridge模式
+                Adapter 模式用来帮助无关的类协同工作，通常在系统设计完成后被使用
+                Bridge 模式在系统开始时就被使用，使得抽象接口和实现部分可以独立进行改变
+        
+        4.3 COMPOSITE // 描述部分-整体 或者容器层次结构
+
+            代码示例：
+                class Equipment{ // component
+
+                };
+
+                class FloppyDisk : public Equipment{ // leaf
+
+                };
+
+                class CompositeEquipment:public Equipment{ // composite
+                    public:
+                        virtual Currency NetPrice(); // component基本属性
+                        virtual void Add(); //  管理组件的接口
+                        virtual void Remove();
+
+                    private:
+                        List<Equipment*> _equipment; // 递归的子类容器
+                };
+
+                class Chassis: public CompositeEquipment{
+                };
+
+                Cabinet* cabinet = new Cabinet("PC cabinet");
+                Chassis* chassis = new Chassis("PC chassis");
+
+                cabinet->add(Chassis); // cabinet中装入chassis
+
+                Bus* bus = new Bus("PC bus");
+                bus->Add(new Card("16MB"));
+
+                chassis->Add(bus);
+                chassis->Add(new FloppyDisk("3.5in floppy"));
+                // 最后cabinet就组装好了
+            · 相关模式
+                Responsibility of chain 用于部件和父部件
+                Decorator 通常与Composite一起使用
+                Flyweight 允许共享组件，但不能再引用父部件
+                Iterator可以遍历Composite
+                Vistor将分布在Comosite和Leaf类中的操作和行为局部化
+        4.4 DECORATOR
+            1. 意图
+                动态的给一个对象添加一些额外的职责
+            2. 别名
+                包装器wrapper
+            3. 代码示例
+                class VisualComponent{
+                    public:
+                        virtual void Draw();
+                        virtual void Resize();
+                };
+                class Decorator: public VisualComponent{
+                    public:
+                        virtual void Draw(){
+                            _component->Draw();
+                        }
+                        virtual void Resize(){
+                            _component->Resize();
+                        }
+                    private:
+                        VisualComponent *_component;
+                        // Decorator装饰_component
+                };
+
+                class BorderDecorator: public Decorator{
+                    public:
+                        virtal void Draw();
+                };
+
+                VisualComponent *cc = new BorderDecorator(TextView);
+                cc->Draw();// 实际调用的是BorderDecorator::Draw();
+            
+            12. 相关模式
+                Adapter：重新设置一个接口；
+                    Decorator：不改变接口，只是修改职责
+                Composite：主要是聚合一系列对象，描述部分和整体或者容器
+                Strategy：改变对象的内核
+                    Decorto：改变对象的外表
+        
+        4.5 FACADE
+            1. 意图
+                为子系统中的一组接口提供一个一致的界面
+            2. 代码示例
+                class Compiler{
+                    public:
+                        Compiler();
+                        virtual void Compile(istream&, BytecodeStream&);
+                        // facade
+                };
+
+                void Compiler::Compile(istream& is, BytecodeStream& bs){
+                    // subsystem
+                    Scanner scanner(is);
+                    ProgramNodeBuilder builder;
+                    Parser parser;
+
+                    parser.Parse(scanner, builder);
+
+                    RISCCodeGenerator generator(bs);
+                    ProgramNode *parseTree = builder.GetRootNode();
+                    parseTree->Traverse(generator);
+                };
+            
+            3. 相关模式
+                Abstract Factory: 可以和Facade一起使用以提供一个接口，这个接口用来生成子系统
+                Facade对象通常属于Singleton
+
+        4.6 FLYWEIGHT
+            1. 意图
+                运用共享技术有效地支持大量细粒度的对象
+            2. 举例
+                创建有限的字符对象集合，以及描述字符对象的所在场景的状态对象集合
+                这里的字符对象集合就是共享对象，用状态来描绘
+        
+        4.7 PROXY
+            1. 意图
+                为其他对象提供一种代理以控制对这个对象的访问
+            2. 别名
+                Surrogate
+            3. 三种类型
+                1. remote proxy
+                2. virtual proxy
+                3. protection proxy
+        
+        4.8 结构型模式讨论
+            Adapter在类设计之后，为了解决两个类不兼容
+            Bridge在类设计之前，就要将抽象的接口独立出来
+
+            Decorator别名包装器Wrapper，实际调用的是包装器的接口
+            Composite描述部分-整体结构或者容器结构，能够从顶层遍历所有的leaf
+            proxy提供一个代理，代理决定是否访问具体实现，Decorator提供具体实现
+
+    3. 行为模式 (paragraph 5)
+        · 行为模式涉及到算法和对象间职责的分配
+        · 行为模式不仅描述类和对象，还描述他们之间的通信模式
+
+        5.1 CHAIN OF RESPONSIBILITY
+            1. 意图
+                使多个对象都有机会处理请求，从而避免请求的发送者和接收者之间的耦合关系.将这些对连成一条链,并沿着这条链传递该要求,直到有一个对象处理它为止
+            2. 代码示例
+                Application* app = new Application;
+                Dialog* dialog = new Dialog(app);
+                Button* button = new Button(dialog);
+
+                button->HandleHelp();
+                // button->dialog->app, 串联起来，一次查找
+
+            3. 相关模式
+                CHAIN OF RESPONSIBILITY(职责链)通常与Composite一起使用
+        5.2 COMMAND - 对象行为模式
+            1. 意图
+                将一个请求封装为一个对象的
+            2. 别名
+                Action
+            3. 类似回调函数，先注册函数，将命令发给指定对象后，再回调这个函数
+                Command发送给指定对象后，接收者执行Command的execute()接口
+        
+        5.3 INTERPRETER - 类行为模式
+            1. 意图
+                给定一个语言，定义它的文法的一种表示，再定义一个解释器，再由解释器使用该表示来解释语言中的句子
+            
+            2. 复杂的文法不如用语法分析程序
+        
+        5.4 ITERATOR - 对象行为模式
+            1. 意图
+                提供一种方法顺序访问一个聚合对象中各个元素，而又不需要暴露该对象的内部表示
+            2. 别名
+                游标 Cursor
+            3. 动机
+                将对列表的访问和遍历从列表对象中分离出来并放入一个iterator中。
+            4. 代码示例
+                template <class Item>
+                class List{
+                    public:
+                };
+
+                template <class Item>
+                class Iterator{
+                    public:
+                };
+
+                template <class Item>
+                class ListIterator:public Iterator{
+                    public:
+                        ListIterator(const List<Item>* aList):_list(alist), _current(0){}
+                        virtual void First(){
+                            _current = 0;
+                        }
+
+                        virtual void Next(){
+                            _current++;
+                        }
+
+                        virtual bool IsDone() const{
+                            return _current >=_list->count;
+                        }
+
+                        virtual Item CurrentItem() const{
+                            if (IsDone()){
+                                throw IteratorOutOfBounds;
+                            }
+                            return _list->Get(_current);
+                        }
+                    private:
+                        const List<Item>* _list;
+                        long _current;
+                        // 存储List和列表当前位置的索引
+                };
+
+                void PrintEmployees (Iterator<Employee*> &i){
+                    for(i.First(); !i.IsDone(); i.Next()){
+                        i.CurrentItem()->print();
+                    }
+                }
+
+                List<Employee*> *employees;
+                LitIterator<Employee*> forward(employees);
+                ReverseListIterator<Employee*> backward(employees);
+
+                PrintEmployees(forward);
+                PrintEmployees(backward);
+
+                // 优化，隐藏手动实例化Iterator，使用List来生成
+                template <class Item>
+                Iterator<Item>* List<Item>::CreateIterator() const{
+                    return new ListIterator<Item>(this);
+                }
+
+                AbstractList<Employee*>* employees;
+                ...
+                Iterator<Employee*>* iterator = employees->CreateIterator(employees);
+                PrintEmployees(*iterator);
+                delete iterator; // 为了自动释放，使用智能指针
+        5.5 MEDIATOR - 对象行为模式
+            1. 意图
+                用一个中介对象来封装一系列的对象交互
+            2. 实际就是封装一个时序图的接口对象出来
+            3. 代码示例
+                class DialogDirector{
+                    public:
+                        virtual void ShowDialog();
+                        virtual void WidgetChanged(Widget*) = 0;
+                    protected:
+                        virtual void CreateWidgets() = 0;
+                };
+
+                class Widget{
+                    public:
+                        Widget(DialogDirector *);
+                        virtual void Changed(){
+                            _director->WidgetChanged(this);
+                        }
+
+                        virtual void HandleMouse(MouseEvent& event);
+                    private:
+                        DialogDirector *_director;
+                };
+            4. 相关模式
+                Facade是提供一个接口驱动系统
+                Mediator是提供接口，供各个子系统通信
+        
+        5.6 MEMENTO - 对象行为模式
+            1. 意图
+                在不破坏封装性的前提下，捕获一个对象的内部状态，并在该对象之外保存这个状态。这样以后就可将该对象恢复到原先保存的状态
+            2. 别名
+                Token
+            3. 代码示例
+                class State;
+                class Originator{
+                    public:
+                        Memento* CreateMemento();
+                        void SetMemento(const Memento);
+                    private:
+                        State *_state;
+                };
+
+                class Memento{
+                    public:
+                        virtual ~Memento();
+                    private:
+                        friend class Origineator; // 只允许Originator访问Memento
+                        Memento();
+                        void SetState(State*);
+                        State* GetState();
+
+                        State* _state;
+                };
+
+                class Graphic;
+                class MoveCommand{
+                    public:
+                        MoveCommand(Graphic* target, const Point& delta);
+                        void Execute(){
+                            ConstraintSolver* solver = ConstraintSolver::instance();
+                            _state = solver->CreateMemento();
+                            _target->Move(_delta);
+                            solver->Solve();
+                            // 备忘录的私有成员只有原发器能访问
+                            // 原发器执行操作
+                        }
+                        void Unexecute(){
+                            ConstraintSolver* solver = ConstraintSolver::instance();
+                            _target->Move(-_delta);
+                            solver->SetMemento(_state);
+                            solver->Solve();
+                            // 备忘录的私有成员只有原发器能访问
+                            // 原发器先恢复状态, 在执行操作
+                        }
+                    private:
+                        ConstraintSolverMemento* _state;
+                        Point _delta;
+                        Graphic* _target;
+                };
+
+                class ConstraintSolver{ // 原发器
+                    public:
+
+                };
+
+                class ConstraintSolverMemento{ // 备忘录
+                    private:
+                        friend class ConstraintSolver;
+                        
+                };
+            4. 相关模式
+                Command：原发器让备忘录保存状态
+                Iterator：让备忘录迭代
+        
+        5.7 OBSERVER - 对象行为模式
+            1. 意图
+                在对象间建立一对多的依赖关系，当一个对象的状态发生变化，所有依赖他的对象都会发生变化
+            2. 别名
+                Dependents， Publish-Subscribe
+            3. 序列图
+                aConcretSubject     aConcretObserver    aConcretObserver
+                    notify()
+                    update()------------
+                                        GetState()
+                    update()------------
+                                                            GetState()
+            4. pull/push模型
+                pull 被动的让observer来获取状态更新
+                push 主动的发出消息，不管observer是否需要
+
+            5. ChangeManager (Mediator\Singleton)
+                将序列图的操作抽象出来
+            6. 代码
+                class Subject;
+                class Observer{
+                    public:
+                        virtual ~Observer();
+                        virtual void Update(Subject* theChangedSubject) = 0;
+                    protected:
+                        Observer();
+                };
+
+                class Subject{
+                    public:
+                        virtual ~Subject();
+                        virtual void Attach(Observer* o)
+                        {
+                            _observer->Append(o);
+                        }
+                        virtual void Detach(Observer* o){
+                            _observer->Remove(o);
+                        }
+                        virtual void Notify(){
+                            ListIterator<Observer*> i(_observer);
+                            for (i.First(); !i.IsDone(); i.Next()){
+                                i.CurrentItem()->Update(this);
+                            }
+                        }// 目标发生变化，触发通知，让observer update自身的状态
+                    protected:
+                        Subject();
+                    private:
+                        List<Observer*> *_observer;
+                };
+
+                class ClockTimer:public Subject{
+                    public:
+                        ClockTimer();
+                        virtual int GetHour();
+                        virtual int GetMinute();
+                        virtual int GetSecond();
+                        void Tick(){
+                            Notify();// 每间隔一段时间就通知observer获取时间更新状态
+                        }
+                };
+
+                // DigitalClock 继承Widget的图形功能，继承Observer的Notify，获取时间的接口
+                class DigitalClock: public Widget, public Observer{
+                    public:
+                        DigitalClock(ClockTimer* s){
+                            _subject = s;
+                            _subject->Attach(this);
+                            // 将observer加入到subject中
+                        }
+                        virtual ~DigitalClock(){
+                            _sub->Detach(this);
+                        }
+                        virtual void Update(Subject* theChangedSubject){
+                            if (theChangedSubject == _subject){
+                                Draw();// update绘制时钟图形
+                            }
+                        }
+                        virtual void Draw(){
+                            int hour = _subject->GetHour();
+                            int minute = _subject->GetMinute
+                        }
+                    private:
+                        ClockTimer* _subject;
+                };
+
+                ClockTimer*timer = new ClockTimer; // subject notify observer
+                DigitalClock* DigitalClock = new DigitalClock(timer); // observer 进行重绘
+
+                MVC就是observer模式
+            6. 相关模式
+                Mediator：ChangeManager抽象序列图中的更新语义
+                Singleton：ChangeManager是唯一全局可访问的
+        
+        5.8 STATE - 对象行为型模式
+            1. 意图
+                允许一个对象在其内部状态改变时改变他的行为。对象看起来似乎修改了他的类
+            2. 别名
+                状态对象(Object For State)
+            3. 代码示例
+                class TCPOctetStream;
+                class TCPState;
+                class TCPConnection{
+                    public:
+                        TCPConnection(){
+                            _state = TCPClosed::Instance();
+                        }
+                        void ActiveOpen(){
+                            _state->ActiveOpen(this);
+                        }
+                        void PassiveOpen(){
+                            _state->PassiveOpen(this);
+                        }
+                        void Close(){
+                            _state->Close(this);
+                        }
+                        void Send();
+                        void Acknowledge(){
+                            _state->Acknowledge(this);
+                        }
+                        void Synchronize(){
+                            _state->Synchronize(this);
+                        }
+                        void ProcessOctet(TCPOctetStream*);
+                    private:
+                        friend class TCPState;
+                        // 友元让TCPState能访问TCPConnection的私有成员
+                        void ChangeState(TCPState* s){
+                            _state = s;
+                        }
+                        TCPState* _state; // 保持各个TCP状态的引用
+                };
+
+                class TCPState{
+                    public:
+                        virtual void Transmit(TCPConnection*, TCPOctetStream*);
+                        virtual void ActiveOpen(TCPConnection*);
+                        virtual void PassiveOpen(TCPConnection*);
+                        virtual void Close(TCPConnection*);
+                        virtual void Synchronize(TCPConnection*);
+                        virtual void Acknowledge(TCPConnection*);
+                        virtual void Send(TCPConnection*);
+                    protected:
+                        void ChangeState(TCPConnection* t, TCPState* s){
+                            t->ChangeState(s);
+                        }
+                        // TCPState可以修改TCPConnection中的数据，改变连接状态
+                };
+
+                在完成与状态相关的工作后，这些操作调用ChangeState来改变TCPConnection的状态。TCPConnection本身对TCP连接协议一无所知，是由TCPState子类来定义TCP中的每一个状态转换和动作
+            4. 相关模式
+                状态对象都是SingleTon
+                FlyWeight解释了何时以及怎样共享状态对象，共享内部的有限对象，外部记录这些对象的状态
+        
+        5.9 STRATEGY - 对象行为模式
+            1. 意图
+                定义一系列的算法，把他们一个个的封装起来，并使他们可以互相替换
+            2. 别名
+                Policy
+            3. 相关模式
+                Flyweight：Strategy对象经常是很好的轻量级对象
+        
+        5.10 TEMPLATE METHOD - 类行为型模式
+            1. 意图
+                定义一个算法的骨架，将一些步骤延迟到子类中。使得子类可以不改变一个算法的结构即可重定义该算法的某些特定步骤。
+            2. 代码
+                void View::Display(){
+                    SetFocus();
+                    DoDisplay();
+                    ResetFocus();
+                }
+
+                void MyView::DoDisplay(){}
+            3. 相关模式
+                Factory Method：经常被Tamplate Method调用，如上面的MyView::DoDisplay()
+                Strategy：Tamplate Method使用继承来改变算法的一部分；Strategy改变整个算法
+             
+        5.11 VISTOR - 对象行为型模式
+            1. 意图
+                对一批元素进行不同处理的时候，封装不同的vistor类，对不同的元素做不同vistor的处理
+        
+        5.12 行为模式的讨论
+            5.12.1 封装变化
+                1. 当一个程序的某个方面的特征经常发生改变时，这些模式就定义一个封装这个方面的对象
+                2. 这些模式通常定义一个抽象类来描述这些封装变化的对象，并且通常该模式依据这个对象来命名，例如：
+                    一个strategy对象封装一个算法
+                    一个state对象封装一个与状态有关的行为
+                    一个mediator对象封装对象间的协议
+                    一个iterator对象封装访问和遍历一个聚集对象中的各个构件的方法
+
+            5.12.2 对象作为参数
+                1. 一个vistor对象是一个多态的Accept操作的参数
+                2. 其他模式定义一些可作为令牌到处传递的对象，这些对象将在稍后被调用
+                    1. Command 中，令牌代表一个请求
+                    2. Memento 中，代表一个对象在某个特定时刻的内部状态
+                    3. Command会用到多态，Memento作为对象传入使用
+            5.12.3 通信应该被封装还是被分布
+                1. mediator和observer互为竞争关系，后者在Observer和subject对象间通信，前者则是封装了对象间的通信
+            5.12.4 对发送者和接收者解耦
+                1. command模式使用一个command对象来定义一个发送者和一个接收者之间的绑定关系，从而支持解耦
+                2. observer通过定义一个接口来通知目标中的发生的变化，从而将发送者和接收者解耦；当对象间有数据依赖，最好使用observer模式
+                3. mediator让对象通过一个mediator对象间接的相互引用，从而对他们解耦；一个mediator对象为各对象间的请求提供路由并集中他们的通信
+                4. chain of responsibility通过沿着一个潜在接收者链传递请求而将发送者和接收者解耦
+            5.12.5 总结
+                1. 另外一些例外情况，各个行为设计模式之间是相互补充和相互加强的关系。
+                    1. chain of responsibility模式中可能包含至少一个template method的应用，该template method可以使用原语确定该对象是否应处理该请求并选择应转发的对象；
+                        command： 可以被用作请求对象
+                    2. Interpreter可以使用state模式定义语法分析上下文
+                    3. Iterator可以遍历一个聚合，vistor可以作为参数对这些元素进行一个操作
+                2. 行为模式也能和其他模式协同工作
+                    1. composite可以使用vistor对符合的成分进行一些操作；chain of responsibility可以通过composite通过父类访问某些全局属性；decorator 可以对composite的某些部分进行改写；它可以使用observer将一个对象结构和另一个对象结构联系起来；它可以使用state模式使一个构件在状态改变时改变自身的行为；composite可以使用builder创建
+
+
+
 
 
 3. 线程并发（同步互斥）
@@ -237,3 +1019,12 @@
 5. 消息队列
 
 6. 性能调优/linux 命令
+
+7. 锁有哪些
+
+8. 一致性
+
+9. 内存泄漏/野指针
+
+
+10. 高并发高可用
