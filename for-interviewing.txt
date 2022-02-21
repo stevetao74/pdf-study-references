@@ -1,9 +1,446 @@
--1. C++11新特性
-    C++ primer plus(6) paragraph 18.1
+;{   高并发高可用
+    单线程epoll就可以做到单台百万并发连接
+        1. ulimit open-files = 1 000 000
+            sysctl -p 生效
+        2. nf_conntrack_max nf_conntrack模块在跟踪连接的时候需要创建一个hash表存储连接, 太小了,导致新来的连接存不了
+        3. 连接耗时: 扩大listen队列 accept并发
+}
+
+;{    线程并发(同步互斥) C++并发编程实战 
+        3.2 使用互斥量保护共享数据
+            3.2.1 C++使用互斥量
+                1. 使用std::mutex,提供lock/unlock接口,不提倡使用
+                2. 优先使用RAII机制的模板std::lock_guard<Class T>
+}
+
+;{    select/epoll
+}
+
+;{    消息队列
+    · zeroMQ解决传统网络编程的问题
+        · 调用的socket接口较多;
+        · TCP是一对一的连接;
+        · 编程需要关注很多socket细节问题;
+        · 不支持跨平台编程;
+        · 需要自行处理分包、组包问题;
+        · 流式传输时需处理粘包、半包问题;
+        · 需自行处理网络异常,比如遭接异常中断、重连等;
+        · 服务端和客户端启动有先后;
+        · 自行处理IO模型
+        · 自行实现消息的缓存;
+        · 自行实现对消息的加密
+    · SEND-ACK 发一次确认一次,吞吐量不高
+}
+
+;{    性能调优/linux 命令
+}
+
+;{    ubus网络数据协议
+    |blob_buf|
+    |blob_buf.buf|
+        |
+    |blob_attr.id_len(记录整个buf的大小) +blob_attr.data(0)|--------------------------------------------------------------|
+                                                          |blob_attr.idlen+blob_attr.data||blob_attr.idlen+blob_attr.data|
+                                                                                    |
+                                                                            |blobmsg_hdr.name:value|
+        · blob_attr{ 
+            uint32_t id_len; // id高一个字节存储数据类型,len低三个字节;
+            char data[]; 
+        } //还要对blob_attr对齐
+            · 对齐算法
+                (len + ALIGNMENT - 1) & ~( ALIGNMENT - 1 ) // a - 1 + n / a = 0, 1, 2 ··· a - 1 , 0, 1 ... a + 1;  n == 1, 1+a, 1+2a才增长
+        · blob_buf {
+            struct blob_attr *head; // 指向blob_buff的整个空间
+            bool (*grow)(struct blob_buf *buf, int minlen); // 控制blob_buf内存自动扩充，每次增加256个字节
+            int buflen; // blob_buf长度
+            void *buf; // 指向一块用blob_attr填充的空间
+        }
+        · blob_buf_init // 初始化blob_buf, 控制自增，给buf填充第一个bob_attr空间
+        · blobmsg
+            · blobmsg_json用于序列化到json
+            · blobmsg_add_u32(&b, "id", 123);
+                从前面初始化的blob_buff的第一个attr后面,增加一个attr的"id"-123的字符串和数字的大小,设置第一个attr的大小加上新加的数据
+                struct blobmsg_hdr {
+                    uint16_t namelen;
+                    uint8_t name[];
+                } __packed;
+                blob_attr的data用blobmsg_hdr填充name字段,偏移namelen后,填充123这个value
+    · protobuf
+        · 四个字节的整数序列化只需要2个字节存储,可以减小传输的数据大小
+}
+
+;{    Linux高性能服务器编程 pdf
+    8 高性能服务器程序框架
+        8.2 服务器编程框架
+            · IO处理单元
+            =======消息队列=====
+            · 逻辑单元
+            =======消息队列=====
+            · 存储单元
+        8.3 I/O模型
+            · 非阻塞IO
+                · I/O复用
+                    · select/poll/epoll_wait注册IO触发事件
+                · SIGIO
+                    · fcntl(int fd, SIGIO, void*args) // fd触发的时候，会收到SIGIO信号
+        8.4 事件处理模式
+            · Reactor
+                · 主线程负责listen事件,工作线程自己从socket上读取客户请求并往socket写入服务器应答
+                · 连接数(百万)
+                    1. ulimit open-files = 1 000 000
+                        sysctl -p 生效
+                    2. nf_conntrack_max nf_conntrack模块在跟踪连接的时候需要创建一个hash表存储连接, 太小了,导致新来的连接存不了
+                    3. 连接耗时: 扩大listen队列 accept并发
+                · IO处理单元
+                    主线程epoll注册listenfd连接,epoll_wait触发就将消息加入到消息队列
+                =======消息队列=====
+                    工作线程处理请求epoll注册写事件,主线程epoll_wait等待可写事件,将可写事件加入队列
+                =======消息队列=====
+                · 逻辑单元
+                    工作线程往fd发送消息
+            · Proactor
+                1. 主线程和内核完成所有的IO操作,工作线程仅仅负责业务逻辑
+                2. aio_read注册读完成事件
+                3. 数据到达,触发信号处理函数,选择一个工作线程处理客户请求, aio_write注册写完成事件
+                4. 数据发送完成,内核发送信号,触发信号处理函数,选择一个工作线程来做善后,比如决定是否关闭socket
+            · Proactor将IO处理单元完全隔离开
+        8.5 两种高效的并发模式
+            · 计算密集型,并发编程还会因为任务切换降低效率
+            · IO密集型,可以在IO阻塞时让出CPU
+            1. 半同步/半异步
+                IO读取数据,添加请求到消息队列是异步的;工作线程从队列中取数据是同步的
+                · 变种1 消息队列插入的是连接socket,工作线程自己读写数据,就变成半同步-半reactor了
+                    两个缺点:
+                        · 消息队列使用互斥锁浪费等待时间
+                        · 连接socket过多,工作线程消费慢,造成积压
+                · 变种2 一种高效的模式,将消息队列改成管道
+                    主线程通过管道传递连接socket是独立的,工作线程使用epoll_wait监听管道是同步,工作线程半异步处理数据
+    
+    13 多进程编程
+        13.1 fork系统调用
+            · fork复制进程映像, 虚拟空间上的数据区、代码区、堆/栈区都一样
+                · 内核进程表中会新加一个进程表项,ppid指向父进程
+                · 新建进程注册的信号位图被清空,不再有注册的信号处理
+            · 这里的复制,遵循COW(写时拷贝)
+            · 文件描述符也被拷贝,引用计数+1,并且父进程中打开的,在子进程中也是打开的
+        13.2 exec系统调用
+            · 替换当前进程映像,代码段等被覆盖,从exec之后就在新的进程中执行
+            · exec是阻塞函数
+            · 父进程打开的文件描述符不会关闭, 除非设置SOCK_CLOEXEC
+}
+
+;{    base64编码
+        每3个字节24位, 按每6位转换成4个值在0-63之间的字符
+        16: 0x30 0x82 0x02
+        2: 00110000 10000010 00000010
+        6bit: 001100 001000 001000 000010
+                12      8      8     2
+        BASE64: M       I      I     C
+        · 数据不满24位的, 不够3字节的补齐,用=号
+}
+
+;{    九章算法
+    1. 如何快速得到子数组的和(双指针、前缀和数组)
+        1. 前缀和数组
+            1. O（n^2）
+                · num[10] = {1,2,3,4,5,6,7,8,9,10};
+                · 构造前缀和数组
+                int sum = 0;
+                    PrefixSum[i] = for_each(&num[0], &num[i], [](int x){
+                        return sum += x; });
+                · 判断某个子数组和>=k满足条件
+                    for (i in start, end) //从头到尾一个个遍历
+                        for (j in i, end) // 一次从每个数开始计算一个子数组内符合的条件
+                            sum_i_j = Prefixsum[j] - Prefixsum[i];
+                            if sum_i_j >= k; then return "found";
+            2. O(n * log(n))
+                · 在前缀和的基础上优化
+                · for (i in start, end) //从头开始遍历
+                  {
+                    while(left + 1 < right) // 二分查找前缀和数组
+                    {
+                        mid = left + (right - left) / 2; // base下标 + 个数
+                        if (PrefixSum[mid] - PrefixSum[start] >= k) // [start, mid]数组和>=k说明目标在mid左边;否则在mid右边
+                        {
+                            right = mid;
+                        }else
+                            left = mid;
+                    }
+                    if (PrefixSum[mid] - PrefixSum[start] >= k) // 查找到最后的值,比较下是哪个
+                        return left;
+                    return right;
+                  }
+        2. 双指针(全是O(n), 同向,想向,背向)
+            1. 同向
+                · 特点: 指针不回头
+                全零字串数量
+                · 算法模板
+                    int sum = 0;
+                    num[10] = {1,2,3,4,5,6,7,8,9,10};
+                    for i in start, end // 从头到尾遍历,i指针后移
+                    {
+                        while(j < n && sum < k) // 比较条件, 总的执行次数是N
+                        {
+                            sum += num[i];
+                            j++; // j指针后移
+                        }
+                        sum -= num[i];
+                    }
+            2. 相向
+                两数之和、三数之和
+            3. 背向
+                最长回文子串
+    2. 买卖股票的最佳时机(隔板法)
+        · price[8] = [4, 4, 6, 1, 1, 4, 2, 5];
+            SumMaxProfit = 0;
+            for (i in start, end) // 遍历安插隔板
+            {
+                int LeftMaxProfit = GetMaxProfit(0, i);
+                int RightMaxProfit = GetMaxProfit(i, end);
+                SumMaxProfit = std::max(SumMaxProfit, LeftMaxProfit+RightMaxProfit);
+            }
+
+            GetMaxProfit(start, end) // 单独计算每个隔板内的最大利润
+            {
+                int MinPrice = INT_MAX;
+                int MaxProfit = 0;
+                for (i in start, end){
+                    MinPrice = std::min(MinPrice, price[i]);
+                    MaxProfit = std::max(MaxProfit, price[i] - MinPrice);
+                }
+                return MaxProfit;
+            }
+    3. BFS(Breath First Search)模板
+        1. 在图中找到从起点start到终点end的最近距离
+            Queue<Node*> queue; // 取出每一层的一个节点,把相邻节点添加到队列后
+            Set<Node> visited; // 已经遍历过的不用再访问
+            queue.push(start); //初始化起点
+            visited.push(start); //标记起点
+            int step = 0;
+
+            while (!queue.empty())
+            {
+                int sz = queue.size(); //获取当前层的节点个数
+                for (size_t i = 0; i < queue.size; i++)
+                {
+                    Node *cur = queue.pop();
+                    if (cur == end)
+                        return step;
+
+                    for (tmp in cur.next) // 遍历节点的邻接点
+                    {
+                        if (visited.find(tmp) == visited.end()) // 避免循环遍历
+                        {
+                            queue.push(tmp);// 添加下一层节点
+                            visited.insert(tmp);
+                        }
+                    }
+                }
+                ++step;
+            }
+        1. 连通块
+        2. 分层遍历
+        3. 拓扑排序
+    4. DFS(Depth First Search) 深度优先 又称回溯算法
+        1. 模板
+            · 路径: 已经做出的选择
+            · 选择列表: 当前可以做的选择
+            · 结束条件
+            result = [] // 记录做出的选择
+            def backtrack(路径):
+                if 满足条件:
+                    result.add(路径)
+                    return
+                
+                for i in 选择列表:
+                    做选择 // 选择一条路径,开始往路径添加节点
+                    backtrack(路径)
+                    撤销选择 //开始第二条路径
+        
+        1. 全排列问题
+            · nums[] = {1,2,3};
+            · List<List<int>> liliPermu;// N个全排列
+            permute(){
+                List<int> liPermu;
+                backtrack(liPermu);
+            }
+
+            backtrack(liPermu)
+            {
+                if (liPermu.size == ARRAYSIZEOf(nums)) // 结束条件,一个全排列的长度排满
+                    liliPermu.push(new List<int>(liPermu)) // 塞入一个全排列结果
+
+                for (int i = 0; i < ARRAYSIZEOf(nums); ++i){
+                    if (std::find(num[i]) == liPermu.end()) // 选择路径,
+                        liPermu.push_back(num[i]);
+
+                    backtrack(nums, liPermu);
+                    liPermu.pop_back()
+                }
+            }
+    5. 字典树(Trie)
+        · 由边和节点构成的字典树,优化字符串的公共前缀
+        · 数据结构
+            class TrieNode{
+                public:
+                    Map<char, TrieNode> children; //每个子节点存储字符到TrieNode的Map
+                    bool IsWord; // 指示某个子节点是不是一个word或者说是叶子节点
+                    String Word; // 叶子节点存储一个字符串
+                    TrieNode(){
+                        IsWord = false;
+                        word = NULL;
+                    }
+            };
+
+            void insert(char word[]) // 往字典树中插入一个字符串
+            {
+                TrieNode *node = root;// 获得根节点
+                for (size_t i = 0; i < word.length; i++) // 遍历字符串
+                {
+                    if (node->children.find(word[i]) == node->children.end())
+                    { // 检查一个边为word[i]的节点是否存在
+                        node->children.insert(make_pair<char, TrieNode>(word[i], new TrieNode()));
+                        // 给root节点创建一个边
+                    }
+                    node = node->children[word[i]]; // 遍历到字符串的下一个字符
+                }
+                node.isword = true;
+                node.word = word; //给叶子节点设置字符串
+            }
+    6. 最大/小堆(用顺序结构存储二叉树)
+        · 数组下标0不用, 1为root, 左节点在2n处, 右节点在2n+1处,父节点在n/2处
+        · 最大/小堆只保证堆顶比子节点大或者小,不保证左右子节点左小右大
+        · 插入时,将值放在数组尾部空处, arr[N] = insert_value;然后向上浮动到正确的位置
+            cur = N;
+            while (cur > 1 && arr[N] < arr[N/2]) //插入N处的值,和父节点作比较
+                exch(arr[N], arr[N/2]), cur = N/2; // 不停的上浮到合适的位置
+        · 删除时,交换arr[1](堆顶,删除就是pop堆顶)和队尾值arr[N], 然后将交换后的值从堆顶下沉到正确的位置
+            exch(arr[1], arr[N]); // 交换堆首/尾,删掉队尾
+            cur = 1;
+            do{
+                if ()
+                    break; // 这就是最小的
+                if (left[cur] < right[cur]) // 从子结点中选一个小的和父节点作比较,保证是最小堆并下沉
+                {
+                    exch(arr[cur],left[cur]); // 交换父子节点
+                    cur = 2 * cur; // 下沉父节点
+                }else{
+                    exch(arr[cur],right[cur]); // 交换父子节点
+                    cur = 2 * cur + 1; // 下沉父节点
+                }
+            }while( !(arr[cur] < left[cur] && arr[cur] < right[cur]) ); 
+            // 如果小于子节点,就找到合适的位置了
+
+
+
+}
+
+;{    IO函数 UNIX网络编程卷1
+    1. recv(int fd, void*recvbuf, size_t recvlen, int flags)
+        · flags 经常使用MSG_DONTWAIT // 设置IO操作为非阻塞,执行完,关闭非阻塞标志
+        · return value;
+            · >0 这次IO读取到的字节数
+            · 0, 连接对方正常关闭连接
+            · -1, 代表发生错误,errno可以获取错误码
+                EAGAIN 套接字为非阻塞模式, IO却是阻塞模式; 超时时间内没有收到数据
+                EINTR 接收到中断信号
+        · 和其他IO函数一样,都是从内核接收缓冲区,复制到用户空间; 驱动设备还要从驱动缓冲区拷贝到内核(这叫2次拷贝)
+        · 应用缓冲区比内核小: 需要循环调用IO函数直到读取完所有数据
+        · 应用缓冲区比内核大: 一次可以读取所有数据
+        · 应用读取到的时候,内核缓冲区就会丢弃这些数据
+    2. send(int fd, void*sendbuf, size_t sendlen, int flags)
+        · return value;
+            · >0 这次IO发送的字节数
+                发送的数据长度比实际发送长, 需要循环发送,直到发送完成;发送缓冲区是通过移动偏移指针,指向发送的位置
+            · 0, 连接对方正常关闭连接
+            · -1, 通过errno查看错误原因
+                EAGAIN/EWOULDBLOCK 套接字为非阻塞模式,IO却是阻塞;发送缓冲区的数据在超时时间内没有发送出去
+                EPIPE 套接字已经关闭
+                EACCES 套接字不可写
+                ENOBUFS 发送缓冲区已满
+    3. readv(int fd, const struct iovec*vector, int count);
+        · struct iovec{
+            void *iov_base; // 如下，指向buffer地址
+            size_t iov_len; // 指明使用的buffer长度
+        };
+
+        char arr[30];
+        struct iovec vecIo[3] = {{.iov_base=&arr[0], .iov_len = 10}};
+        vecIo[1].iov_base = &arr[10];
+        vecIo[1].iov_len = 10;
+        vecIo[2].iov_base = &arr[20];
+        vecIo[2].iov_len = 10;
+
+
+    4. writev(int fd, const struct iovec*vector, int count); // 同readv
+    5. recvmsg(int fd, struct msghdr *msg, int flags);
+        · 辅助数据
+            struct cmsghdr {
+                socklen_t        cmsg_len;
+                int                  cmsg_level;
+                int                  cmsg_type;
+            };
+
+        struct msghdr{
+            void *msg_name; // 源地址，指向struct sockaddr的指针
+            socklen_t msg_namelen;
+            struct iovec *msg_iov;  //如上
+            size_t msg_iovlen;  // msg_iov的个数
+            void *msg_control;  // 指向cmsghdr控制信息
+            socklen_t msg_controllen;
+            int msg_flags;
+        };
+
+    6. sendmsg(int fd, struct msghdr *msg, int flags); // 同上 
+    7. read/write可以对所有文件描述符使用
+        recv/send,recvfrom/sendto,recvmsg/sendmsg只能操作套接字
+        readv/writev可以使用多个buffer
+        recvfrom/sendto可以指定对方IP套接字
+        recvmsg/sendmsg可以在struct msghdr中指定对方IP和控制信息,
+            sendmsg用flags参数控制socket MSG_NOWAIT
+            recvmsg用msg_flags参数控制
+
+}
+
+;{    进程间通信 Linux内核设计的艺术:图解Linux操作系统架构设计与实现原理 第2版
+    1. pipe管道
+        · 内核给每个管道分配一页内存,并给予文件属性,即具有读写接口.//进程的PCB的files指针会记录,并创建inode节点, linux默认大小65535
+        · 这一页内存分配在内核空间,即不属于任何用户进程,并与inode节点关联起来.//读写的时候意味着进入内核空间
+        · 因为分读写端,所以创建两个文件描述符fd,同时指向inode节点指向的内存
+        · fd[0]设置为读属性, fd[1]设置为写属性
+        · 读管道时,没有可读数据时,sleep_on就会挂起,加入等待队列,schedule到其他进程;有数据时,wakeup,从等待队列中唤醒
+        · 写管道类似, 条件时有无可写空间
+    2. socketpair 双向管道,线程间通信
+
+    3. signal信号
+        1. PCB的tast_struct数据结构带有一个sigaction数据结构
+        2. 系统检查收到信号的时机
+            1. 应用从系统调用返回之前检测是否收到信号
+            2. 时钟中断后, 中断返回之前,检测一次
+        3. sigaction设置信号对信号函数的映射
+        4. 信号发送进程给目标进程的信号标志设置1,回到用户空间,执行pause()将进程设置成可中断等待状态
+        5. schedule调度时, 遍历进程是否有注册信号的,设置对应的进程状态为就绪态
+        6. 在pause()从系统调用返回的时候,就会调用这个信号函数
+}
+
+;{    Cache cpu 操作系统45讲
+    LRU 程序局部性:
+        Cache存在的原因
+    cache由高速静态存储器(cache和内存交换数据的最小单位是一行),地址转换模块,cache行替换模块(脏位 回写位 访问位)组成
+    一致性:
+        1. 一个 CPU 核心中的指令 Cache 和数据 Cache 的一致性问题
+        2. 多个 CPU 核心各自的 2 级 Cache 的一致性问题
+        3.CPU 的 3 级 Cache 与设备内存,如 DMA,网卡帧储存,显存之间的一致性问题.这里我们不需要关注这个问题
+        Cache数据同步协议:
+            MESI MOESI 
+            cache硬件会监控数据,并解决数据一致性
+}
+
+;{    C++11新特性 C++ primer plus(6) paragraph 18.1
     · 新增long long内置类型 支持64位
-    · 支持{}初始化列表，包括内置类型和自定义的类类型
+    · 支持{}初始化列表,包括内置类型和自定义的类类型
         1. 缩窄
-            char chr = {8888}; //编译错误，禁止往更窄类型转换
+            char chr = {8888}; //编译错误,禁止往更窄类型转换
     · 新的声明
         ...
     · explicit
@@ -11,46 +448,48 @@
             explicit plebe(int num) {}; // convert int to plebe;
             explicit operator int() const {}; // convert plebe to int;
         };
-    · 移动语义和右值引用 // 计算机移动文件，文件的存储位置实际不变，只是修改文件的描述信息，这叫移动语义
+    · 移动语义和右值引用 // 计算机移动文件,文件的存储位置实际不变,只是修改文件的描述信息,这叫移动语义
         class Useless{
-            Useless(Useless && us){} // 编写移动语义，第一步，实现移动构造函数
+            Useless(Useless && us){} // 编写移动语义,第一步,实现移动构造函数
             Useless operator=(Useless && us) {} // 这里是移动赋值函数
         }
 
         Useless one, three;
-        Useless four(one + three); // 这里调用上面的移动构造函数， 编写移动语义，第二步，传入右值，调用移动构造函数
-            // 即one+three 不会创建临时对象，再拷贝给four
+        Useless four(one + three); // 这里调用上面的移动构造函数, 编写移动语义,第二步,传入右值,调用移动构造函数
+            // 即one+three 不会创建临时对象,再拷贝给four
     paragraph 18.2.5 强制移动
         Useless choices[10];
         Useless best;
         int pick;
         best = choices[pick]; // 拷贝赋值函数
             // static_cast<Useless &&> choices[pick] 静态编译期的强转成右值类型
-            // C++11 提供std::move()函数，可以转换成右值类型
+            // C++11 提供std::move()函数,可以转换成右值类型
         
         实现移动语义
-        1. 第一步，提供移动构造或者移动赋值函数
+        1. 第一步,提供移动构造或者移动赋值函数
         2. 传入右值
-        3. 即使提供了右值，但没有实现移动构造或移动赋值，就会使用复制构造或复制赋值函数
-        4. 如果有一个构造函数，但没有提供复制构造函数或复制赋值函数，同样也不会触发移动语义
+        3. 即使提供了右值,但没有实现移动构造或移动赋值,就会使用复制构造或复制赋值函数
+        4. 如果有一个构造函数,但没有提供复制构造函数或复制赋值函数,同样也不会触发移动语义
+}
 
-
-0. malloc
-
+;{    malloc 深入理解计算机CSAPP
     malloc分配内存
         lt 128K 在data segment区域末尾的heap区 + size
-            使用brk(void *) sbrk(int) 设置data segment结束位置， 分配可读写内存块
+            使用brk(void *) sbrk(int) 设置data segment结束位置, 分配可读写内存块
             sbrk(int size)
                 size > 0 将program break向栈的方向移动size
-                size = 0 返回当前program break的地址(void*)p，但不可读写
-                    经由brk((int*)p + 1) 设置data segment结束位置，分配一个int大小可读写的内存块
+                size = 0 返回当前program break的地址(void*)p,但不可读写
+                    经由brk((int*)p + 1) 设置data segment结束位置,分配一个int大小可读写的内存块
 
-        gt 128K mmap 在 堆和栈中间再找一块可用空间（TOP_DOWN | DOWN_TOP）
+        gt 128K mmap 在 堆和栈中间再找一块可用空间(TOP_DOWN | DOWN_TOP)
 
         strace可以看到brk sbrk mmap等函数调用输出日志
+    
+    alloca(): 动态的在栈上分配空间,并自动释放
+}
 
-1. 智能指针
-    C++ primer plus(6)
+;{    智能指针 C++ primer plus(6)
+    · RAII
     paragraph 16.2 智能指针类模板
         template<class _Ty>
         class auto_ptr
@@ -73,7 +512,7 @@
                 ...
                 _Ty * release() noexcept
                 {	// return wrapped pointer and give up ownership
-                    _Ty * _Tmp = _Myptr; // 先把原来的指针作为临时指针返回回去，付给新的quto_ptr
+                    _Ty * _Tmp = _Myptr; // 先把原来的指针作为临时指针返回回去,付给新的quto_ptr
                     _Myptr = nullptr; // 再把原来的指针指向NULL; 后续再访问就会崩溃
                     return (_Tmp);
                 }
@@ -85,26 +524,26 @@
         auto_ptr<string> auto_str = new string("123") ; // 禁止使用implicit 构造
         auto_ptr<string> auto_str(&string("123") ) ; // 禁止构造非堆区内容
 
-        0. 智能指针都有在生命周期结束的时候，自动析构掉指向的堆内容
+        0. 智能指针都有在生命周期结束的时候,自动析构掉指向的堆内容
 
         1. uniq_ptr 和auto_ptr 重新赋值左值都会夺取原有的控制权
             uniq_ptr会出现编译错误, 但允许临时右值赋值(C++11)
-            auto_ptr对原来指针的访问会出现运行时错误，夺走控制权的时候被赋值NULL(被弃用的原因)
+            auto_ptr对原来指针的访问会出现运行时错误,夺走控制权的时候被赋值NULL(被弃用的原因)
 
-        2. shared_ptr指向的时候，会有引用计数的概念，允许同时多个指向
+        2. shared_ptr指向的时候,会有引用计数的概念,允许同时多个指向
 
         3. uniq_ptr还多一个数组类型相较其他智能指针
 
         4. shared_ptr提供一个auto_ptr转型的构造函数
 
         auto_ptr<string> auto_str1 = auto_str; // 禁止多个智能指针指向同一个对象的地址
-                // auto_ptr 会夺走原有的智能指针的控制权，导致原来的智能指针指向NULL，这时候访问该内容会出现崩溃
-            // shared_ptr 每增加指向同一个对象的指针，引用计数就加一
-            // uniq_ptr 只限定一个指向对象的指针，auto_ptr也有这个特性
+                // auto_ptr 会夺走原有的智能指针的控制权,导致原来的智能指针指向NULL,这时候访问该内容会出现崩溃
+            // shared_ptr 每增加指向同一个对象的指针,引用计数就加一
+            // uniq_ptr 只限定一个指向对象的指针,auto_ptr也有这个特性
 
         uniq_ptr<string> uniq_str(new (string("123")));
         uniq_ptr<string> uniq_str1 = uniq_str;
-            //这里报错不会出现在运行时，编译期间就会报错，禁止多个uniq_ptr指向同一个对象地址
+            //这里报错不会出现在运行时,编译期间就会报错,禁止多个uniq_ptr指向同一个对象地址
 
         uniq_ptr<string> demo(char *s)
         {
@@ -112,24 +551,592 @@
             return tmp;
         }
 
-        uniq_ptr<string> ps = demo("123"); // 这里从demo返回的uniq_ptr控制权被夺走，无法对临时智能指针访问，编译器允许这种写法
-        // 进一步描述， 编译器允许uniq_ptr被一个临时右值赋值，因为临时右值没有机会再访问
+        uniq_ptr<string> ps = demo("123"); // 这里从demo返回的uniq_ptr控制权被夺走,无法对临时智能指针访问,编译器允许这种写法
+        // 进一步描述, 编译器允许uniq_ptr被一个临时右值赋值,因为临时右值没有机会再访问
 
         uniq_ptr<string> pt = std::move(ps) // std空间提供uniq_ptr给uniq_ptr赋值
 
         uniq_ptr<double[]> pt(new double(5)); // 配对使用delete[]; uniq_ptr比auto_ptr多一个数组类型
+}
+
+;{    计算机网络 计算机网络:自顶向下 paragraph 3
+        3. 运输层TCP
+            1. 差错检测(校验和)
+            2. ACK+ Sequence 是否冗余 累计确认
+            3. 重传(倒计数定时器)
+                超时,或者没有收到ACK
+                1. 发送端每次发送一个分组,就启动一个定时器
+                2. 发送端响应定时器中断
+                3. 发送端终止定时器
+            4. 协议的收发两端必须缓存多个分组,这些分组是没有ACK确认的,已经确认的可以不用
+            5. 回退N步算法(GO BACK N)也被叫做滑动窗口协议
+                1. 流水线中未确认的分组数不能超过某个最大允许数N,这被叫做窗口长度
+                    这是流量控制对发送方施加限制的一个原因
+                2. base为最早的未确认分组的序号
+                3. nextseqnum下一个待发分组的序号
+                4. 超过N的不可用
+                5. 接收方的ACK 是采取累计确认的,0-99 + ACK,100-199 + ACK
+                    · 并且一次向上交付一个分组,所以这个分组前的也应该已经交付了
+                    · 接收方丢弃所有失序分组,期望接收分组N,却收到了N+1,丢弃N+1,就可以重发
+                6. 分组多的情况下,连接里,重发的分组会很多
+            6. 选择重传(Selective Repeat)
+                1. 接收方确认一个正确接收的分组而不管其是否按序
+                2. 接收方失序的分组将被缓存直到所有丢失分组(序号更小的分组)都被收到为止.这时就可以将一批分组按序交给上层
+            7. MSS MTU
+                · TCP可从缓存中取出并放入报文段中的数据数量受限于MSS(Maximum Segment Size 最大报文段长度 1500 - TCP/IP首部长度40)
+                · 一般根据本地发送主机发送的最大链路层帧长度MTU(Maximum Transmission Unit 最大传输单元 1500),除掉TCP/IP首部长度40
+                · 当TCP发送一个大文件时,比如一个图像,TCP通常将该文件划分成长度为MSS的若干块;telnet这样的应用交互传送的数据一般比较小,也许只有21个字节
+            8. TCP连接的组成:
+                · 传输层的发送缓存,接收缓存,套接字
+                · TCP连接收到正确,按序的字节后,就把数据放入到接收缓存中
+                · 应用层读取的速度小于传输层发送的速度,就会出现接收缓存溢出,所以需要流量控制服务(Flow Control Service)
+            9. TCP报文头字段
+                · 序号: 按照要发送的字节流编号
+                    50000个字节,MSS=1000,TCP传输层将为该数据流分成50个报文段,第一个报文段序号0,第二个1000 ···
+            10. 快速重传
+                · 发送方接收到对相同数据的3个冗余ACK,TCP就会执行快速重传之前丢失的报文段
+            11. TCP是GBN和SR的结合体
+            12. 流量控制服务(Flow control Service) - 与报文中接收窗口字段配合
+                · 发送方维护接收窗口(receive window)的变量rwnd
+                · 接收缓存大小为RecvBuffer,应用层不时的从接收缓存中读取数据
+                    LastByteRead:应用层读取的数据流的最后一个字节编号
+                    LastByteRcvd:网络传输的数据放入接收缓存的数据流的最后一个字节的编号
+                · LastByteRcvd - LastByteRead <= RecvBuffer才不会溢出
+                · 那么发送方收到的rwnd = RecvBuffer - (LastByteRcvd - LastByteRead)
+                    LastByteSent:最后发送的字节流的一个字节编号
+                    LastByteAcked:最后发送的字节流的被确认的一个字节编号
+                    然后发送方的 LastByteSent - LastByteAcked <= rwnd 保证发送的数据不会撑爆接收缓存
+                · rwnd=0时,发送方会继续给接收方发送只有一个字节的报文段
+                · UDP没有流量控制,会将缓存溢出
+            13. 拥塞控制(Congestion Control)
+                · TCP发送方也可能因为IP网络的拥塞而被遏制
+                    路由器由于网络拥挤导致接收缓存溢出,导致这部分报文丢失
+                    报文丢失(一段时间没有收到ACK),就会产生分组重传
+                · 分组重传可以作为网络拥塞的征兆
+                1. 端到端拥塞控制
+                    · TCP分配的缓存和变量,在前面rwnd(接收窗口)等变量的基础上,再加上一个额外的变量cwnd(Congestion Window),小于两个窗口中较小的一个
+                        LastByteSent - LastByteAcked <= min {rwnd,cwnd}
+                    1. 拥塞检测
+                        超时或者三次冗余确认导致的重传被认为是网络拥塞的一个迹象,TCP会相应的减小窗口长度N
+                    2. 发送方收到ACK后,认为网络不拥塞,可以增加发送方的速率
+                    3. TCP拥塞控制算法
+                        0. ssthresh值
+                            cwnd>=ssthresh时,cwnd开始谨慎+1
+                        1. 慢启动
+                            · CWND初始速率为MSS/RTT,在收到ACK确认报文后,CWND设置为2,速率变为2MSS/RTT,一次发两个报文段;同时收到这两个的ACK之后,CWD=2,再同时发送4个出去;收到4个ACK后,CWND+=4;以此类推,处于一个慢启动的过程
+                            · 结束增长的时机
+                                1. 检测到拥塞,CWND重新设置为1,重新开始慢启动,并将ssthresh指设置为cwnd/2
+                                2. cwnd>=ssthresh时,结束慢启动,进入拥塞避免模式
+                                3. 检测到3个冗余ACK,进入迅速恢复状态
+                            ssthresh为1
+                        2. 拥塞避免
+                            TCP更为谨慎的增加CWND
+                            1. CWND值减为上次遇到拥塞时的一半
+                            2. CWND的值每次只增加一个MSS
+                            3. ssthresh变为一半
+                            4. 进入快速恢复状态
+                        3. 快速恢复
+                            1. 对收到的每个冗余ACK,cwnd都增加一个MSS
+                            2. 当收到ACK确认报文时,才降低cwnd进入拥塞避免
+                            3. 当超时时,会进入慢启动状态
+                            4. 当丢包事件出现时,cwnd=1MSS,ssthresh=cwnd/2
+                        4. TCP Tahoe算法
+                            不管是发生超时时指示的丢包事件,还是发生3个冗余ACK指示的丢包事件,都无条件的将cwnd=1MSS,并进入慢启动
+                        5. TCP Reno算法
+                            在丢包时,cwnd每次只加+1,尽管已经进入慢启动状态
+                        6. TCP拥塞加性增,乘性减
+                            cnwd开始每次加1,遇到3ACK丢包事件,cwnd减半
+                        7. 目前lunux采用CUBIC算法
+                2. 网络辅助的拥塞控制
+                    交换机间维护这一条VC虚电路,逐个VC的状态允许交换机跟踪各个发送方的行为
+            14. 三次握手
+                · 服务器在收到客户端的ACK之后,为该TCP连接分配TCP缓存和变量(这里分配的内存会因为SYN攻击暴增)
+                · 客户端收到服务端的SYNACK报文后,为该TCP连接分配TCP缓存和变量,另外发给服务端的SYNACK报文里的SYN为0,因为连接建立完成了,以后都是0.这时的报文段里可以负载数据了
+                · 三次握手中服务端发送SYNACK之后,一段时间后没收到SYNACK就会断开这个SYN_RCVD半连接状态,并释放内存
+            15. 四次挥手
+                · TCP连接双方都可以关闭连接,连接结束后,释放缓存和变量分配的内存
+            16. TCP状态机(Finite Status Machine)
+                ·客户端CLOSED状态------客户发起连接发送SYN报文--->客户端SYN_SENT状态--收到SYNACK后发送SYN(0)+ACK-->客户端ESTABLISHED状态
+                ·客户端准备关闭连接,发送FIN报文,进入FIN_WAIT_1状态----收到服务端的ACK--->客户端FIN_WAIT_2状态----收到服务端FIN(1)---->客户端TIME_WAIT状态----客户端发送ACK---->客户端CLOSED状态
+                    如果TIME_WAIT状态下发出去的ACK丢失了,服务端会重传FIN(1),然后重发ACK,如果发出去了,服务端就会关闭;如果没有发出去,在TIME_WAIT这段时间里,客户端会不停重试,直到时间过后,最终都会关闭
+                · 服务端开始时CLOSED状态----主动创建socket--->服务端LISTEN状态-----收到SYN报文,并发送SYNACK--->服务端SYN_RCVD状态---收到SYNACK--->服务端ESTABLISHED----收到FIN,发送ACK---->服务端CLOSE_WAIT状态----服务端发送FIN---->服务端LAST_ACK状态----收到ACK---->服务端CLOSED状态
+            17. SYN cookie
+                服务端收到SYN报文连接请求后,不急着创建半开连接分配内存,而是先缓存下来,直到下次发来的ACK是经过特殊函数生成的sequence+1的才创建全开连接
+            18. 丢包
+                · 连续发送三次冗余ACK
+                · 超时
+
+        4. 网络层
+            0. 网络层组成
+                1. 路由选择协议,进行路径选择,负责生成转发表
+                2. IP协议,IP数据报字段
+                3. ICMP协议,报告数据包中的差错和对某些网络层信息请求进行响应
+            1. 构造网络层分组交付的方法
+                1. 数据报模式
+                2. 虚电路模式
+            2. 转发(forwarding)
+                · 当一个分组到达路由器的一条输人链路时,路由器必须将该分组移动到适当的输出链路
+                · 每台路由器都有一张转发表
+            3. 路由选择(routing)
+                当分组从发送方流向接收方时,网络层必须决定这些分组所采用的路由或路径.计算这些路径的算法被称为路由选择算法(routing algorithm)
+            4. 网络层提供了单一的服务,称为尽力而为服务,各种得不到保证
+            5. 网络层的连接和无连接
+                1. 有连接的称为虚电路(virtual Circuit)网络
+                    · 路由器必须为进行中的连接维持连接状态信息
+                        · 创建一条新的虚电路,转发表就新增一个新表项
+                        · 终止一条新的虚电路,转发表就删除对应的表项
+                    · 虚电路三个阶段
+                        1. 虚电路建立
+                        2. 数据传送
+                        3. 虚电路拆除
+                    · 端系统向网络发送指示虚电路启动和终止的报文,以及路由器之间传递的用于建立虚电路的报文,统称为信令报文,交换报文的协议称为信令协议
+                2. 无连接的称为数据报网络
+                    1. 网络层发送分组,在分组前加一个目的IP
+                    2. 分组传递过程中的路由器使用目的IP前缀做转发,前提是在路由器中有一个将目的IP前缀映射到链路接口的转发表,映射时拿目的IP前缀匹配
+                    3. 当分组到达路由器时,路由器就根据目的IP前缀转发到对应的接口去
+                    4. 目的IP前缀匹配采用最长前缀匹配规则,避免一个目的IP指向多个接口
+                    5. 路由器中的转发表通过路由选择算法进行修改,每隔1-5分钟左右更新一次
+            6. IP层数据报格式
+                · TTL Time To Live
+                    数据报每经过一台路由器时,该字段值就-1,为0,就会被丢弃
+                · 标识,标志,片偏移
+                    与IP分片有关
+                · 协议
+                    指示了IP数据报的数据报部分应该交给那个运输层协议,6代表TCP,17代表UDP,这将传输层和运输层绑在一起
+                · 首部校验和
+                    将IP首部的数据每两个字节当作一个数,最后算出所有和的反码
+                · 数据(有效载荷)
+                    这里包含运输层报文段或者ICMP报文
+            7. IP数据报分片
+                · 分片(fragment)(IPV6已经废止了分片)
+                    不同路由器设备间的MTU协议不一样,1500的MTU过大就要分成多个较小的IP数据报交给数据链路层,然后发送出去
+                    1 标识
+                        一个完整的数据报分片后,每个分片都一个标识号,表示这几个分片构成一个数据报
+                    2 标志
+                        为了确定收到了最后的一个片,用标志0标识,其他的为1
+                    3 偏移字段
+                    每个片在完整数据报上的偏移
+                · 组装
+                    · 片在到达端(PC)系统的运输层前需要重新组装
+                    · 为了组装这些片,需要将标识,标志和片偏移字段放在IP数据报首部中
+                        整个完整的分片组装完成后才会交给运输层,如果有一个或多个片没有到达,则不完整的数据报会被丢弃(TCP会控制重传)
+            8 IPv4编址
+                1. 无类别域间路由选(Classless Interdomain Routing, CIDR)
+                    · 格式
+                        a.b.c.d/x a.b.c.d前X位称为该地址的前缀,一个子网共享同一个前缀,这相当大的减少了在路由器中转发表的长度;32-x比特用来区分该子网的内部设备的
+                2. 分类编址(classful addressing)
+                    · 8/16/24分别称为A/B/C类网络
+                    · 广播地址255.255.255.255用来给子网内所有主机发送报文
+                3. 动态主机配置协议(Dynamic Host Configuration, DHCP)
+                    · DHCP是一个4个步骤的过程(UDP)
+                        1. DHCP发现
+                            客户给255.255.255.255发送广播DHCP发现报文,让新到的主机发现DHCP服务端
+                        2. DHCP提供
+                            DHCP服务器收到DHCP发现报文后向客户做出响应,仍然使用255.255.255.255广播,子网中可能有多个DHCP服务器
+                        3. DHCP请求
+                            新到的客户端从中选择一个服务器,然后发送一个DHCP请求报文
+                        4. DHCP ACK
+                            服务器对DHCP请求做出确认
+                4. 网络地址转换(Network Address Translation, NAT)
+                    · NAT转换表,从外网侧进入路由器转发到子网各个端口
+                        外网IP+端口 -> 内网IP+端口
+                    · NAT穿越
+                        A->B->C A和C称为穿越
+            9. 因特网控制报文协议(ICMP)
+                · ICMP是被主机和路由器用来彼此沟通网络层的信息,最典型的用途是差错报告
+                · 差错报告
+                    · '网络不可达'的错误报文
+                · Traceroute
+                    为了判断源和目的地之间所有路由器的名字和地址,源主机向目的主机发送一系列普通的IP数据报,这些数据报都携带了具有一个不可达UDP端口号的UDP报文段(使用TTL来控制,第一个TTL=1,第二个为2...);当这个报文到达第N个路由器,路由器发现TTL=0,就会丢弃该数据报并给源主机发送一个ICMP告警报文(类型11编码0,TTL过期),这个告警报文包含路由器的名字和IP,并且当ICMP到达源主机时,源主机根据定时器得到往返时延,得到第N个路由器的名字和IP地址
+            10. 路由选择算法(最小路径选择)
+                1. 全局式路由选择算法,常被称为链路状态算法(Link Status,LS)
+                    · OSPF路由选择协议中使用链路状态广播算法(Link State Broadcast)获得网络中所有其他节点广播链路状态的特征和费用
+                        1 Dijkstra算法
+                            · 定义三个接口
+                                list LiNode // 存储所有未遍历的节点,不包括起点
+                                Dis(start, node) // 起点到node节点的最短路径
+                                PreNode() // 获取当前最短路径的前一个结点
+                                Cost[node1, node2] // 记录相邻节点间的cost
+                                1. 初始化一个获取Dis(start, node)的列表
+                                    table[start, node] = INFINITE
+                                    //和start是临接点的重新初始化
+                                2. 遍历总共N个节点
+                                    while(N--){
+                                        node = getNodeCostMin(Dis(start, Node(N)));//每次选择一个Dis(Node)最小的加入进来
+                                        Node.pop(node);
+
+                                        for (tmp : LiNode) //遍历剩下邻接node
+                                        {
+                                            Dis(start, tmp) = min(Dis(start, tmp), Dis(start, node) + Cost(node, tmp)); // 再新增一个遍历节点时,从起点到邻接node的Dis要么是已有的Dis(start, tmp),要么是Dis(start,node)+从当前点到邻接点新增的一段cost
+                                        }
+
+                                    }
+                        2 距离向量路由选择算法(Distance-Vector, DV)
+                            1. 分布式
+                                每个节点都和周围节点交互接收信息,再将计算结果分发给邻居
+                            2. 迭代
+                                这个过程要持续到邻居之间无更多信息要交换为止(一般会自动停止)
+                            3. 异步
+                                各个节点之间独立操作
+            11. 因特网中的路由选择
+                1. RIP(Routing Information Protocol) 因特网中自治系统内部的路由选择
+                    · RIP响应报文(RIP response msg) 又称RIP通告(RIP advertisement)
+                        · 邻接路由器或主机每隔30秒交换一次报文,报文中包含了一个该AS内的多达25个目的子网的列表,以及发送方到其中每个子网的距离
+                        · 路由器超过180秒没收到邻居的RIP通告报文,这个邻居就是不可达的.并且修改本地路由选择表,向周围邻居传播该消息
+                        · 路由器使用UDP再520端口上发送RIP报文
+                        · RIP是一个运行在UDP上的应用层进程
+                    · 路由选择表(Routing table)
+                        包括该路由器的距离向量和转发表(目的子网,下一台路由器,到目的地的跳数)
+                    · 这个使用DV算法
+                2. OSPF(Open Shortest Path First) 开放最短路优先
+                    · RIP一般放在下层ISP中,OSPF在上层ISP中
+                    · OSPF,向自治系统内所有路由器广播路由选择信息,RIP只向邻居广播
+                    · 每隔30分钟或者一条链路的状态发生变化
+                    · OSPF运行在IP层
+                    · 这个使用LS中的Dijkstra算法
+                3. 自治系统间的路由选择 BGP（Boder Gateway Protocol）
+            12. 广播(broadcast routing)和多播路由(multicast routing)选择
+                1. 广播路由选择算法
+                    1. 无控制洪泛
+                        · 每次经过一个节点就对子网进行复制报文并分发,当网络拓扑存在环的情况下,会导致无休止的循环,导致广播风暴
+                    2. 受控洪泛
+                        1. 序号控制洪泛
+                            源节点将其地址和广播序号放入广播分组,再向邻居发送分组.每个节点维护已经收到的,复制的和转发的源地址和每个广播分组的序号列表.如果收到的分组的序号已经在列表中,就丢弃
+                        2. 反向路径转发(Reverse Path Forwarding, RPF)
+                            来的时候,分组是根据最小路径发来的,所以返回的时候,也是发来的路径. 如果是别的路径发来的就会被丢弃
+                        3. 生成树广播
+                            确定一个中心点作为广播中心,生成一个最小生成树
+                        4. 实践中的广播算法
+                            1. 应用层在TCP中添加序号
+                            2. OSPF应用序号控制洪泛
+            13. 多播
+                · IGMP通知一个路由器:主机运行的一个应用程序想加入一个特定的多播组
+        5. 链路层
+            5.1.1 链路层提供的服务
+                1. 成帧
+                2. 链路接入
+                    媒体访问控制(Medium Access Control, MAC)协议规定了帧在链路上的传输规则,点对点链路和多路访问
+                3. 可靠交付
+                4. 差错检测和纠正
+            5.1.2 链路层在何处实现
+                · 链路层的主体部分是在网络适配器(Network Adapter,也称网络接口卡Network Interface Card, NIC)中实现的.
+                · 适配器核心是链路层控制器,里面提供链路层服务
+                · CPU中的部分链路层软件提供组装链路层寻址信息和激活控制器硬件
+                · 接收端,链路层软件响应控制器中断,开始处理差错条件或者向上传递数据报
+            5.2 差错检测和纠正技术
+                5.2.1 奇偶校验
+                    在发送的d个比特数据之后设置一个奇偶位,使得这d+1个比特中出现1的个数是奇数或者偶数
+                5.2.2 校验和方法
+                    · 运输层采用校验和,链路层使用CRC
+                5.2.3 循环冗余检测(Cyclie Redundancy Check, CRC),也称为多项式编码
+                    · d比特数据+r比特CRC多项式,使用d+r比特数据除以多项式最后余数为0
+                    · 异或操作: 没有进位的减法
+                    · D*2^r XOR R = nG
+                        R = remainder(D*2^r/G)
+            5.3 多路访问链路和协议
+                · 碰撞
+                    传输的帧在所有的接收处碰撞(collide),碰撞发生,没有一个接收节点能有效的获得任何传输的帧(碰撞的帧的信号纠缠在一起)
+                5.3.1 信道划分协议
+                    · 时分多路复用(TDM)
+                    · 频分多路复用(FDM)
+                    · 码分多址(Code Division Multiple Access, CDMA)
+                5.3.2 随机接入协议
+                5.3.3 轮流协议
+            5.4 交换局域网
+                5.4.1 链路层寻址和ARP
+                    1. MAC地址 又称 LAN地址 物理地址
+                        6个字节大小
+                    2. 地址解析协议(Address Resolution Protocol)
+                        ·主机或路由器在内存中具有一个ARP表,包含IP到MAC的映射
+                        · 发起方用MAC广播地址(FF-FF-FF-FF-FF-FF)发送ARP查询分组,然后收到IP和MAC映射的ARP分组,更新本地的ARP表
+                        · ARP是即插即用的,如果主机和子网断开,这个主机的映射就会被删掉
+                5.4.2 以太网
+                    1. 以太网帧
+                        · 数据字段
+                            以太网的最大传输单元(MTU)是1500,超过1500,就会分片
+                        · 类型字段
+                            区别IP/ARP协议内容
+                        · 前同步码
+                            同步两个网卡的发送和接收
+                5.4.3 链路层交换机
+                    1. 交换机转发和过滤
+                        · 交换机表,包含MAC地址,网卡接口,过期时间
+                    2. 交换机和路由器的区别
+                        · 交换机会有广播风暴的问题,路由器有广播多播算法
+                        · 2/3层
+                5.4.4 虚拟局域网
+                    · 交换机中维护一个端口到vlan的映射表
+
+}
+
+;{    锁有哪些 操作系统45讲
+        互斥锁 自旋锁 读写锁 (统称悲观锁)
+        CAS锁 (乐观锁)
+        分布式锁
+        1. 互斥锁 mutex
+            互斥锁加锁失败会释放CPU,调度其他线程;自旋锁加锁失败会一直占用CPU直到加锁成功
+        2. 无锁CAS 无锁队列
+            static inline unsigned __sl_cas(volatile unsigned *p, unsigned old, unsigned new)
+            {
+                __asm__ __volatile__("cas.l %1,%0,@r0"
+                    : "+r"(new)
+                    : "r"(old), "z"(p)
+                    : "t", "memory" ); // *p == old ? new = old : new = new;
+                return new;
+            }
+
+            // 使用CAS锁实现自旋锁
+            static inline void arch_spin_lock(arch_spinlock_t *lock)
+            {
+                // 1 -> 0 自旋锁加锁成功
+                while (!__sl_cas(&lock->lock, 1, 0));
+            }
+
+        3. 自旋锁 协调多核心 CPU
+            ...
+            关闭中断,避开中断影响
+            lock前缀 锁住当前CPU和内存的总线通信,防止多个CPU同时访问内存中的变量
+            自旋锁没有获得资源的时候,会不停占用CPU,对于很多不能马上获取资源的情况下,会很浪费CPU,所以改良成信号量
+        4. linux读写锁
+            1. 读写锁也称共享-独占锁 Shared-Exclusive
+                读取时:加的共享锁,写入时:独占锁(互斥)
+                读写锁本质是自旋锁的变种
+            2. 读写锁非常适合读取数据的频率远大于修改数据的频率的场景
+            3. 已经有读锁,可以再加读锁;不能再加写锁,读写互斥
+            4. 已经有写锁,不能再加读锁,读写互斥;也不能再加写锁,写写互斥
+            5. read_lock,write_lock RW_LOCK_BIAS=0x1000000
+                read_lock: lock - 1
+                write_lock: lock - 0x1000000
+                加锁失败的时候,进入自旋锁的步骤,直到加锁成功
+        5. 悲观锁 (认为线程间同时修改共享资源的概率比较高)
+            互斥锁,自旋锁,读写锁,都是悲观锁
+            // 读写数据的时候,预先加锁排他
+        6. 乐观锁 (认为线程间同时修改共享资源的概率比较低)
+            CAS 
+            // 预先不加锁,通过原子指令排除并发
+
+        7. 原子操作(只适合单体变量)
+            a++改成原子++,鉴于不同芯片对原子++操作的支持,这里写一手汇编代码
+            汇编嵌入:
+                volatile的语义
+                    1. 强制对修饰的变量,读取时从内存中读取,写入时,立即写入到内存中. 避免使用不同cpu的cache里存储的值,而不是内存里的值
+                    2. 禁止指令重新排序
+                typedef struct {
+                    volatile s32_t a_count; // 访问变量时,强制从内存读写
+                } atomic_t;
+
+                static inline void atomic_add(int i, atmoic_t *v)
+                {
+                    // lock 锁住CPU到内存的总线,只有当前CPU核心可以访问该变量,实现原子操作
+                    // volatile 禁止指令重新排序
+                    __asm__ __volatile__("lock;" "addl %1,%0":"+m" (v->a):"ir" (i));
+                }
+
+        8. 开关中断和单线程同步
+            void hal_cli(){
+                // cli 关闭中断 clear interrupt
+                __asm__ __volatile__("cli":"memory");
+            }
+
+            void hal_sti(){
+                // sti 开启中断 set interrupt
+                __asm__ __volatile__("sti":"memory");
+            }
+
+            void foo()
+            {
+                hal_cli();
+                ...
+                hal_sti();
+            }
+            嵌套版改善:每次关中断之前先压入一次eflags,开中断都是恢复这个eflags,如果有多层,根据栈的特性关几次,就要开几次才能开中断
+
+        9. 信号量 CPU时间管理大师 // 进程互斥
+            1. 用自旋锁包装信号量
+                信号量的加锁/解锁,分别用自旋锁控制进入
+            2. 对信号量资源不够的情况下进入睡眠队列,等待唤醒,避免占用CPU
+            3. schedule_timeout 让当前调用进程进入睡眠
+                wake_up_process 从信号量的休眠队列中唤醒进程
+        10. 分布式锁
+            · 同步不同机器的进程的锁
+            · 涉及范围
+                数据库(redis,mysql),zk
+                · redis锁
+                    · 进程挂掉导致死锁,超时解锁
+                    · 四元组
+                        srcip:srcport:starttime(保证顺序):pid
+                    · setnx加锁
+                        setnx("lock", 四元组, ..., expiretime)
+                        · 新建一个key
+                        · 超时时间到了, 执行未完成可以续时间
+                    · 释放锁+事务(watch命令)
+                        if(get(key) == 四元组)
+                            delete(key)
+                    
+
+}
+
+;{    内存泄漏/野指针 Linux-Unix系统编程手册
+    ·glibc: malloc/free/mtrace/muntrace/mcheck/mprobe/MALLOC_CHECK_ 环境变量 //以上都可以参考glibc手册
+        另外有一些非标准库函数mallopt()/mallinfo()
+    ·malloc调试,glibc提供了和标准malloc函数包相同的API,但附加了捕获内存分配错误的功能。要使用调试库,需要在编译时链接,这些库有Electric Fence、dmalloc、Valgrind、Insure++
+}
+
+;{    中断 软件调试
+    · 中断来自外部设备,异常(把由INT n指令称为软件中断)是cpu主动产生的
+    1. cpu触发(hal层,硬件层)
+        cpu->中断门描述符->异常处理入口     ->异常分发器    ->中断异常描述符
+                        ->中断处理入口     ->中断分发器    ^
+    2. 中断控制器
+        多个设备的中断信号线都会连接到中断控制器上,中断控制器可以决定启用或者屏蔽哪些设备的中断,还可以决定设备中断间的优先级
+    3. 异常
+        故障:页错误
+        陷阱:系统调用
+        中止:不可恢复的错误,转到内核的abort(),结束应用进程
+}
+
+;{    wine
+    lightdm-kwin-xorg
+    1. wine -> preloader ->wine
+        client:
+            fd_socket = server_connect();
+                s = socket( AF_UNIX, SOCK_STREAM, 0 )) 
+                connect( s, (struct sockaddr *)&addr, slen ) != -1)
+                return s;
+            ntdll_get_thread_data()->request_fd = receive_fd( &version );
+                recvmsg( fd_socket, &msghdr, MSG_CMSG_CLOEXEC )) > 0) // client收到server-thread发送来的cmsg_contorl = fd: request_pipe[1]; msg_iov = SERVER_PROTOCOL_VERSION
+                    msghdr.msg_iov     = &vec;
+                    vec.iov_base = (void *)handle;
+                    vec.iov_len  = sizeof(*handle);
+                    for (cmsg = CMSG_FIRSTHDR( &msghdr ); cmsg; cmsg = CMSG_NXTHDR( &msghdr, cmsg ))
+                    {
+                        if (cmsg->cmsg_level != SOL_SOCKET) continue;
+                        if (cmsg->cmsg_type == SCM_RIGHTS) fd = *(int *)CMSG_DATA(cmsg);
+                    }
+                    return fd;
+            (version != SERVER_PROTOCOL_VERSION) // server-client比较版本
+            ...
+            init_thread_pipe
+                server_pipe( reply_pipe )
+                wine_server_send_fd( reply_pipe[1] );
+                    cmsg->cmsg_level = SOL_SOCKET;
+                    cmsg->cmsg_type  = SCM_RIGHTS;
+                    *(int *)CMSG_DATA(cmsg) = fd;
+                    msghdr.msg_controllen = cmsg->cmsg_len;
+                    vec.iov_base = (void *)&data;
+                    vec.iov_len  = sizeof(data);
+
+                    data.tid = GetCurrentThreadId();
+                    data.fd  = fd;
+                    if ((ret = sendmsg( fd_socket, &msghdr, 0 )) // 客户端给server发送写pipe端，和自己的线程id
 
 
-2. 设计模式
-    设计模式：可复用面向对象软件的基础
+                wine_server_send_fd( ntdll_get_thread_data()->wait_fd[1] );
+                ntdll_get_thread_data()->reply_fd = reply_pipe[0]; // 客户端自己留一个读pipe端
+            ...
+            wine_server_call( req );
+                if ((ret = send_request( req ))) return ret;
+                     SERVER_START_REQ( init_first_thread )
+                        write( ntdll_get_thread_data()->request_fd, &req->u.req, // 给线程的request_pipe[1]发送req
+
+
+        启动wine-server, 
+        wine向服务端发送"sock"域内套接字,服务端不主动消息,但是发回连接套接字
+        listen
+            client = accept( get_unix_fd( master_socket->fd )
+            process = create_process( client,
+            create_thread( -1, process, NULL );
+                (pipe( request_pipe )
+                close( request_pipe[1] );
+                
+                send_client_fd( process, request_pipe[1], SERVER_PROTOCOL_VERSION ) 
+                    send_client_fd( struct process *process, int fd, obj_handle_t handle )
+                        cmsg = CMSG_FIRSTHDR( &msghdr );
+                        *(int *)CMSG_DATA(cmsg) = fd;
+                        msghdr.msg_controllen = cmsg->cmsg_len;
+
+                        msghdr.msg_iov     = &vec;
+                        msghdr.msg_iovlen  = 1;
+
+                        vec.iov_base = (void *)&handle;
+                        vec.iov_len  = sizeof(handle);
+                        ret = sendmsg( get_unix_fd( process->msg_fd ), &msghdr, 0 ); // thread给client：process->msg_fd发送一个cmsg_contorl = fd; msg_iov = SERVER_PROTOCOL_VERSION， 这个发送给客户端
+                        ...
+                        fd = request_pipe[0];
+                        if (!(thread->request_fd = create_anonymous_fd( &thread_fd_ops, fd, &thread->obj, 0 ))) // 线程成了读取端
+                        set_fd_events( thread->request_fd, POLLIN );
+            
+            thread_fd_ops:
+                thread_poll_event( struct fd *fd, int event )
+                    else if (event & POLLIN) read_request( thread );
+                        call_req_handler( thread );
+                    else if (event & POLLOUT) write_reply( thread );
+
+        process
+            client = accept( get_unix_fd( master_socket->fd )
+                process = create_process( client,
+                    process->msg_fd = create_anonymous_fd( &process_fd_ops, fd
+                        ...
+                        set_fd_events( process->msg_fd, POLLIN );
+
+            process_fd_ops:
+                else if (event & POLLIN) receive_fd( process ); 
+                    recvmsg( get_unix_fd( process->msg_fd ), &msghdr, 0 );
+                        if (cmsg->cmsg_type == SCM_RIGHTS) fd = *(int *)CMSG_DATA(cmsg); // 收到线程的request_pipe[1]写端
+}
+
+;{    位图 bitset
+        · 基础数据结构, 选用最长的整形unsgned long long/long, 分配静态数组array[N];
+        · set接口
+            ((_Array[_Pos / _Bitsperword/*8bit * sizeof(unsigned long long)*/] // pos/(8*8) 确定在哪个base，pos%(8*8)确定在这个long的第几位
+			    & ((_Ty)1 << _Pos % _Bitsperword)) != 0);
+        · 布隆过滤器
+            · biset空间过大的情况下,key:0/1的空间利用率不够
+                采用多个hash_func, 充分利用bitset
+            · 使用多个hash_func在位图上标记出来
+                查找一个key是否存在, 需要对每个hash_func做计算,每个bit都为1,才存在;如果有一个不存在,就肯定不存在
+            · 一般这个hash_func会尽量避免冲突
+                · 如果冲突,就会在某次查找的时候存在误差,本来不存在的key编程存在的,但这是可以接受的
+            · 场景
+                ·redis缓存穿透
+                    · redis缓存的数据,出现大量数据没有被访问到的情况下直接查询数据库
+                    · 加上布隆过滤器,可以避免redis查询的开销;误差的情况可以避免
+}
+
+;{    Git
+    · merge & rebase
+        merge
+            把两条独立的分支的修改合并进一条分支, 要想条分支都拥有全量代码,需要互相merge一次
+        rebase
+            1. 有2条分支, 取出最近的一系列修改, 复制一份留在原地
+            2. rebase合并的时候, 把另一条和复制的修改合并到一起
+            3. 现在表象就是在一条分支上的顺序开发, merge会有两条
+    · HEAD
+        · cat .git/HEAD 查看当前HEAD指向
+        · git symbolic-ref HEAD 对HEAD指向的引用进行解引用
+        · 分离的HEAD
+            · 正常的HEAD指向是HEAD指向分支,然后指向提交记录
+                HEAD->main->log
+                分离的HEAD指向提交记录,没指向分支
+                    HEAD->log // git checkout commit, 就和分支分离了
+    · 相对引用
+        · git checkout commit_id太长了不方便
+        · <分支名字>^[num] 从当前引用向前移动num个提交记录
+            此时指针指向HEAD^[num]
+
+
+
+}
+
+;{    设计模式 设计模式:可复用面向对象软件的基础
     1. 创建型模式
         1. Abstract Factory (paragraph 3.1)
             客户->                              抽象工厂
                                                     抽象产品
                                                         具体工厂
                                                             具体产品
-            不限定一定要有Abstract Factory, 可以直接定义一个具体工厂， 再定义继承这个具体工厂的子工厂；
-            调用的时候定义一个方法，传入这个具体的子类的指针
+            不限定一定要有Abstract Factory, 可以直接定义一个具体工厂, 再定义继承这个具体工厂的子工厂;
+            调用的时候定义一个方法,传入这个具体的子类的指针
 
             class MazeFactory{};
             Maze *MazeGame::CreateMaze (MazeFactory &factory){}
@@ -141,13 +1148,13 @@
             EnchantedMazeFactory enchFactory;
             BoomedMazeFactory boomFactory;
             mz.CrateMaze( enchFactory );
-            mz.CrateMaze( boomFactory ); // 使用的时候，传入具体的子工厂
+            mz.CrateMaze( boomFactory ); // 使用的时候,传入具体的子工厂
 
-        2. Builder (paragraph 3.2) // 创建组件，添加到产品中
+        2. Builder (paragraph 3.2) // 创建组件,添加到产品中
             new ConcreteBuilder
             new Director(ConcreteBuilder)
             construct: // 执行building
-                ConcreteBuilder.BuildPart() // 处理请求，将部件添加到产品中
+                ConcreteBuilder.BuildPart() // 处理请求,将部件添加到产品中
                 ConcreteBuilder.GetResult() // 执行完后获取结果
                 // buildpart构造代码 和 getresult表示代码分开
 
@@ -172,9 +1179,9 @@
                     return builder.GetMaze(); // GetResult
                 }
 
-            这和Abstartct Factory直接生成产品不一样, builder是在Director的控制下一步步的构造产品的，先完成build，再取回产品 
-            Abstract Factory着重多个系列产品， Builder类可以差别很大
-            Abstract Factory是立即返回结果的，Builder是在完成之后，由Director自己取的
+            这和Abstartct Factory直接生成产品不一样, builder是在Director的控制下一步步的构造产品的,先完成build,再取回产品 
+            Abstract Factory着重多个系列产品, Builder类可以差别很大
+            Abstract Factory是立即返回结果的,Builder是在完成之后,由Director自己取的
 
         3. Factory Method (paragraph 3.3)
             Product                                     Creator
@@ -184,7 +1191,7 @@
                                                             FactoryMethod()
                                                                 return new ConcreteProduct;
 
-            Creator声明工厂方法，返回一个Product；ConcreteCreator重定义工厂方法，返回ConcreteProduct
+            Creator声明工厂方法,返回一个Product;ConcreteCreator重定义工厂方法,返回ConcreteProduct
 
             1.  定义一个Creator
                 class MazeGame{
@@ -210,7 +1217,7 @@
                 }
 
             3. Abstract Factory经常用Factory Method来实现
-                前者注重系列产品种类，实现细节却是Creator-ConcreteCreator::FactoryMethod{ return ConcreteProduct;}
+                前者注重系列产品种类,实现细节却是Creator-ConcreteCreator::FactoryMethod{ return ConcreteProduct;}
 
             4. Factory Method经常在Template Method中被调用
 
@@ -310,7 +1317,7 @@
                 return _instance;
             }
 
-            对于多种类型的子类创建：
+            对于多种类型的子类创建:
             Singleton* Singleton::Instance()
             {
                 if (_instance == 0)
@@ -353,11 +1360,11 @@
                                                 request()
                                                     adaptee.SpecifiedRequest()
 
-                原有的类Target，原有的接口:request()
+                原有的类Target,原有的接口:request()
                 新的类Adaptee, 新的接口:SpecifiedRequest()
-                Adapter同时继承两个类或者内含新类的实例，经由原来的类的接口调用到新的类或者对象的接口
+                Adapter同时继承两个类或者内含新类的实例,经由原来的类的接口调用到新的类或者对象的接口
 
-            代码示例：
+            代码示例:
                 1. 多继承
                     class Shape{
                         public:
@@ -374,7 +1381,7 @@
                             virtual bool IsEmpty();
                     };
 
-                    // adapter 公开继承原有的接口，私有继承新接口（只能调用新类提供的函数访问私有变量）
+                    // adapter 公开继承原有的接口,私有继承新接口(只能调用新类提供的函数访问私有变量)
                     class TextShape: public Shape, private TextView{
                         public:
                             TextShape();
@@ -421,10 +1428,10 @@
 
         2. BRIDGE (paragraph 4.2)
             · 意图
-                将抽象部分和实现部分分离，使他们可以独立的变化
+                将抽象部分和实现部分分离,使他们可以独立的变化
             · 别名
                 Handle/Body
-            · 代码示例：
+            · 代码示例:
                 class Window{
                     public:
 
@@ -465,12 +1472,12 @@
                 };
             · 相关模式
                 Abstract Factory可以用来创建和配置一个特定的bridge模式
-                Adapter 模式用来帮助无关的类协同工作，通常在系统设计完成后被使用
-                Bridge 模式在系统开始时就被使用，使得抽象接口和实现部分可以独立进行改变
+                Adapter 模式用来帮助无关的类协同工作,通常在系统设计完成后被使用
+                Bridge 模式在系统开始时就被使用,使得抽象接口和实现部分可以独立进行改变
         
         4.3 COMPOSITE // 描述部分-整体 或者容器层次结构
 
-            代码示例：
+            代码示例:
                 class Equipment{ // component
 
                 };
@@ -506,7 +1513,7 @@
             · 相关模式
                 Responsibility of chain 用于部件和父部件
                 Decorator 通常与Composite一起使用
-                Flyweight 允许共享组件，但不能再引用父部件
+                Flyweight 允许共享组件,但不能再引用父部件
                 Iterator可以遍历Composite
                 Vistor将分布在Comosite和Leaf类中的操作和行为局部化
         4.4 DECORATOR
@@ -542,11 +1549,11 @@
                 cc->Draw();// 实际调用的是BorderDecorator::Draw();
             
             12. 相关模式
-                Adapter：重新设置一个接口；
-                    Decorator：不改变接口，只是修改职责
-                Composite：主要是聚合一系列对象，描述部分和整体或者容器
-                Strategy：改变对象的内核
-                    Decorto：改变对象的外表
+                Adapter:重新设置一个接口;
+                    Decorator:不改变接口,只是修改职责
+                Composite:主要是聚合一系列对象,描述部分和整体或者容器
+                Strategy:改变对象的内核
+                    Decorto:改变对象的外表
         
         4.5 FACADE
             1. 意图
@@ -573,15 +1580,15 @@
                 };
             
             3. 相关模式
-                Abstract Factory: 可以和Facade一起使用以提供一个接口，这个接口用来生成子系统
+                Abstract Factory: 可以和Facade一起使用以提供一个接口,这个接口用来生成子系统
                 Facade对象通常属于Singleton
 
         4.6 FLYWEIGHT
             1. 意图
                 运用共享技术有效地支持大量细粒度的对象
             2. 举例
-                创建有限的字符对象集合，以及描述字符对象的所在场景的状态对象集合
-                这里的字符对象集合就是共享对象，用状态来描绘
+                创建有限的字符对象集合,以及描述字符对象的所在场景的状态对象集合
+                这里的字符对象集合就是共享对象,用状态来描绘
         
         4.7 PROXY
             1. 意图
@@ -594,27 +1601,27 @@
                 3. protection proxy
         
         4.8 结构型模式讨论
-            Adapter在类设计之后，为了解决两个类不兼容
-            Bridge在类设计之前，就要将抽象的接口独立出来
+            Adapter在类设计之后,为了解决两个类不兼容
+            Bridge在类设计之前,就要将抽象的接口独立出来
 
-            Decorator别名包装器Wrapper，实际调用的是包装器的接口
-            Composite描述部分-整体结构或者容器结构，能够从顶层遍历所有的leaf
-            proxy提供一个代理，代理决定是否访问具体实现，Decorator提供具体实现
+            Decorator别名包装器Wrapper,实际调用的是包装器的接口
+            Composite描述部分-整体结构或者容器结构,能够从顶层遍历所有的leaf
+            proxy提供一个代理,代理决定是否访问具体实现,Decorator提供具体实现
 
     3. 行为模式 (paragraph 5)
         · 行为模式涉及到算法和对象间职责的分配
-        · 行为模式不仅描述类和对象，还描述他们之间的通信模式
+        · 行为模式不仅描述类和对象,还描述他们之间的通信模式
 
         5.1 CHAIN OF RESPONSIBILITY
             1. 意图
-                使多个对象都有机会处理请求，从而避免请求的发送者和接收者之间的耦合关系.将这些对连成一条链,并沿着这条链传递该要求,直到有一个对象处理它为止
+                使多个对象都有机会处理请求,从而避免请求的发送者和接收者之间的耦合关系.将这些对连成一条链,并沿着这条链传递该要求,直到有一个对象处理它为止
             2. 代码示例
                 Application* app = new Application;
                 Dialog* dialog = new Dialog(app);
                 Button* button = new Button(dialog);
 
                 button->HandleHelp();
-                // button->dialog->app, 串联起来，一次查找
+                // button->dialog->app, 串联起来,一次查找
 
             3. 相关模式
                 CHAIN OF RESPONSIBILITY(职责链)通常与Composite一起使用
@@ -623,18 +1630,18 @@
                 将一个请求封装为一个对象的
             2. 别名
                 Action
-            3. 类似回调函数，先注册函数，将命令发给指定对象后，再回调这个函数
-                Command发送给指定对象后，接收者执行Command的execute()接口
+            3. 类似回调函数,先注册函数,将命令发给指定对象后,再回调这个函数
+                Command发送给指定对象后,接收者执行Command的execute()接口
         
         5.3 INTERPRETER - 类行为模式
             1. 意图
-                给定一个语言，定义它的文法的一种表示，再定义一个解释器，再由解释器使用该表示来解释语言中的句子
+                给定一个语言,定义它的文法的一种表示,再定义一个解释器,再由解释器使用该表示来解释语言中的句子
             
             2. 复杂的文法不如用语法分析程序
         
         5.4 ITERATOR - 对象行为模式
             1. 意图
-                提供一种方法顺序访问一个聚合对象中各个元素，而又不需要暴露该对象的内部表示
+                提供一种方法顺序访问一个聚合对象中各个元素,而又不需要暴露该对象的内部表示
             2. 别名
                 游标 Cursor
             3. 动机
@@ -691,7 +1698,7 @@
                 PrintEmployees(forward);
                 PrintEmployees(backward);
 
-                // 优化，隐藏手动实例化Iterator，使用List来生成
+                // 优化,隐藏手动实例化Iterator,使用List来生成
                 template <class Item>
                 Iterator<Item>* List<Item>::CreateIterator() const{
                     return new ListIterator<Item>(this);
@@ -701,7 +1708,7 @@
                 ...
                 Iterator<Employee*>* iterator = employees->CreateIterator(employees);
                 PrintEmployees(*iterator);
-                delete iterator; // 为了自动释放，使用智能指针
+                delete iterator; // 为了自动释放,使用智能指针
         5.5 MEDIATOR - 对象行为模式
             1. 意图
                 用一个中介对象来封装一系列的对象交互
@@ -728,11 +1735,11 @@
                 };
             4. 相关模式
                 Facade是提供一个接口驱动系统
-                Mediator是提供接口，供各个子系统通信
+                Mediator是提供接口,供各个子系统通信
         
         5.6 MEMENTO - 对象行为模式
             1. 意图
-                在不破坏封装性的前提下，捕获一个对象的内部状态，并在该对象之外保存这个状态。这样以后就可将该对象恢复到原先保存的状态
+                在不破坏封装性的前提下,捕获一个对象的内部状态,并在该对象之外保存这个状态。这样以后就可将该对象恢复到原先保存的状态
             2. 别名
                 Token
             3. 代码示例
@@ -794,14 +1801,14 @@
                         
                 };
             4. 相关模式
-                Command：原发器让备忘录保存状态
-                Iterator：让备忘录迭代
+                Command:原发器让备忘录保存状态
+                Iterator:让备忘录迭代
         
         5.7 OBSERVER - 对象行为模式
             1. 意图
-                在对象间建立一对多的依赖关系，当一个对象的状态发生变化，所有依赖他的对象都会发生变化
+                在对象间建立一对多的依赖关系,当一个对象的状态发生变化,所有依赖他的对象都会发生变化
             2. 别名
-                Dependents， Publish-Subscribe
+                Dependents, Publish-Subscribe
             3. 序列图
                 aConcretSubject     aConcretObserver    aConcretObserver
                     notify()
@@ -811,7 +1818,7 @@
                                                             GetState()
             4. pull/push模型
                 pull 被动的让observer来获取状态更新
-                push 主动的发出消息，不管observer是否需要
+                push 主动的发出消息,不管observer是否需要
 
             5. ChangeManager (Mediator\Singleton)
                 将序列图的操作抽象出来
@@ -840,7 +1847,7 @@
                             for (i.First(); !i.IsDone(); i.Next()){
                                 i.CurrentItem()->Update(this);
                             }
-                        }// 目标发生变化，触发通知，让observer update自身的状态
+                        }// 目标发生变化,触发通知,让observer update自身的状态
                     protected:
                         Subject();
                     private:
@@ -858,7 +1865,7 @@
                         }
                 };
 
-                // DigitalClock 继承Widget的图形功能，继承Observer的Notify，获取时间的接口
+                // DigitalClock 继承Widget的图形功能,继承Observer的Notify,获取时间的接口
                 class DigitalClock: public Widget, public Observer{
                     public:
                         DigitalClock(ClockTimer* s){
@@ -887,8 +1894,8 @@
 
                 MVC就是observer模式
             6. 相关模式
-                Mediator：ChangeManager抽象序列图中的更新语义
-                Singleton：ChangeManager是唯一全局可访问的
+                Mediator:ChangeManager抽象序列图中的更新语义
+                Singleton:ChangeManager是唯一全局可访问的
         
         5.8 STATE - 对象行为型模式
             1. 意图
@@ -942,25 +1949,25 @@
                         void ChangeState(TCPConnection* t, TCPState* s){
                             t->ChangeState(s);
                         }
-                        // TCPState可以修改TCPConnection中的数据，改变连接状态
+                        // TCPState可以修改TCPConnection中的数据,改变连接状态
                 };
 
-                在完成与状态相关的工作后，这些操作调用ChangeState来改变TCPConnection的状态。TCPConnection本身对TCP连接协议一无所知，是由TCPState子类来定义TCP中的每一个状态转换和动作
+                在完成与状态相关的工作后,这些操作调用ChangeState来改变TCPConnection的状态。TCPConnection本身对TCP连接协议一无所知,是由TCPState子类来定义TCP中的每一个状态转换和动作
             4. 相关模式
                 状态对象都是SingleTon
-                FlyWeight解释了何时以及怎样共享状态对象，共享内部的有限对象，外部记录这些对象的状态
+                FlyWeight解释了何时以及怎样共享状态对象,共享内部的有限对象,外部记录这些对象的状态
         
         5.9 STRATEGY - 对象行为模式
             1. 意图
-                定义一系列的算法，把他们一个个的封装起来，并使他们可以互相替换
+                定义一系列的算法,把他们一个个的封装起来,并使他们可以互相替换
             2. 别名
                 Policy
             3. 相关模式
-                Flyweight：Strategy对象经常是很好的轻量级对象
+                Flyweight:Strategy对象经常是很好的轻量级对象
         
         5.10 TEMPLATE METHOD - 类行为型模式
             1. 意图
-                定义一个算法的骨架，将一些步骤延迟到子类中。使得子类可以不改变一个算法的结构即可重定义该算法的某些特定步骤。
+                定义一个算法的骨架,将一些步骤延迟到子类中。使得子类可以不改变一个算法的结构即可重定义该算法的某些特定步骤。
             2. 代码
                 void View::Display(){
                     SetFocus();
@@ -970,17 +1977,17 @@
 
                 void MyView::DoDisplay(){}
             3. 相关模式
-                Factory Method：经常被Tamplate Method调用，如上面的MyView::DoDisplay()
-                Strategy：Tamplate Method使用继承来改变算法的一部分；Strategy改变整个算法
+                Factory Method:经常被Tamplate Method调用,如上面的MyView::DoDisplay()
+                Strategy:Tamplate Method使用继承来改变算法的一部分;Strategy改变整个算法
              
         5.11 VISTOR - 对象行为型模式
             1. 意图
-                对一批元素进行不同处理的时候，封装不同的vistor类，对不同的元素做不同vistor的处理
+                对一批元素进行不同处理的时候,封装不同的vistor类,对不同的元素做不同vistor的处理
         
         5.12 行为模式的讨论
             5.12.1 封装变化
-                1. 当一个程序的某个方面的特征经常发生改变时，这些模式就定义一个封装这个方面的对象
-                2. 这些模式通常定义一个抽象类来描述这些封装变化的对象，并且通常该模式依据这个对象来命名，例如：
+                1. 当一个程序的某个方面的特征经常发生改变时,这些模式就定义一个封装这个方面的对象
+                2. 这些模式通常定义一个抽象类来描述这些封装变化的对象,并且通常该模式依据这个对象来命名,例如:
                     一个strategy对象封装一个算法
                     一个state对象封装一个与状态有关的行为
                     一个mediator对象封装对象间的协议
@@ -988,43 +1995,23 @@
 
             5.12.2 对象作为参数
                 1. 一个vistor对象是一个多态的Accept操作的参数
-                2. 其他模式定义一些可作为令牌到处传递的对象，这些对象将在稍后被调用
-                    1. Command 中，令牌代表一个请求
-                    2. Memento 中，代表一个对象在某个特定时刻的内部状态
-                    3. Command会用到多态，Memento作为对象传入使用
+                2. 其他模式定义一些可作为令牌到处传递的对象,这些对象将在稍后被调用
+                    1. Command 中,令牌代表一个请求
+                    2. Memento 中,代表一个对象在某个特定时刻的内部状态
+                    3. Command会用到多态,Memento作为对象传入使用
             5.12.3 通信应该被封装还是被分布
-                1. mediator和observer互为竞争关系，后者在Observer和subject对象间通信，前者则是封装了对象间的通信
+                1. mediator和observer互为竞争关系,后者在Observer和subject对象间通信,前者则是封装了对象间的通信
             5.12.4 对发送者和接收者解耦
-                1. command模式使用一个command对象来定义一个发送者和一个接收者之间的绑定关系，从而支持解耦
-                2. observer通过定义一个接口来通知目标中的发生的变化，从而将发送者和接收者解耦；当对象间有数据依赖，最好使用observer模式
-                3. mediator让对象通过一个mediator对象间接的相互引用，从而对他们解耦；一个mediator对象为各对象间的请求提供路由并集中他们的通信
+                1. command模式使用一个command对象来定义一个发送者和一个接收者之间的绑定关系,从而支持解耦
+                2. observer通过定义一个接口来通知目标中的发生的变化,从而将发送者和接收者解耦;当对象间有数据依赖,最好使用observer模式
+                3. mediator让对象通过一个mediator对象间接的相互引用,从而对他们解耦;一个mediator对象为各对象间的请求提供路由并集中他们的通信
                 4. chain of responsibility通过沿着一个潜在接收者链传递请求而将发送者和接收者解耦
             5.12.5 总结
-                1. 另外一些例外情况，各个行为设计模式之间是相互补充和相互加强的关系。
-                    1. chain of responsibility模式中可能包含至少一个template method的应用，该template method可以使用原语确定该对象是否应处理该请求并选择应转发的对象；
-                        command： 可以被用作请求对象
+                1. 另外一些例外情况,各个行为设计模式之间是相互补充和相互加强的关系。
+                    1. chain of responsibility模式中可能包含至少一个template method的应用,该template method可以使用原语确定该对象是否应处理该请求并选择应转发的对象;
+                        command: 可以被用作请求对象
                     2. Interpreter可以使用state模式定义语法分析上下文
-                    3. Iterator可以遍历一个聚合，vistor可以作为参数对这些元素进行一个操作
+                    3. Iterator可以遍历一个聚合,vistor可以作为参数对这些元素进行一个操作
                 2. 行为模式也能和其他模式协同工作
-                    1. composite可以使用vistor对符合的成分进行一些操作；chain of responsibility可以通过composite通过父类访问某些全局属性；decorator 可以对composite的某些部分进行改写；它可以使用observer将一个对象结构和另一个对象结构联系起来；它可以使用state模式使一个构件在状态改变时改变自身的行为；composite可以使用builder创建
-
-
-
-
-
-3. 线程并发（同步互斥）
-
-4. select/epoll
-
-5. 消息队列
-
-6. 性能调优/linux 命令
-
-7. 锁有哪些
-
-8. 一致性
-
-9. 内存泄漏/野指针
-
-
-10. 高并发高可用
+                    1. composite可以使用vistor对符合的成分进行一些操作;chain of responsibility可以通过composite通过父类访问某些全局属性;decorator 可以对composite的某些部分进行改写;它可以使用observer将一个对象结构和另一个对象结构联系起来;它可以使用state模式使一个构件在状态改变时改变自身的行为;composite可以使用builder创建
+}
