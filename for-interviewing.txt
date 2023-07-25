@@ -1,9 +1,168 @@
-;{   高并发高可用
+;{   高并发高可用 高并发系统设计40问
     单线程epoll就可以做到单台百万并发连接
-        1. ulimit open-files = 1 000 000
+        0. ulimit open-files = 1 000 000
+        1. cat /proc/sys/fs/file-max
             sysctl -p 生效
         2. nf_conntrack_max nf_conntrack模块在跟踪连接的时候需要创建一个hash表存储连接, 太小了,导致新来的连接存不了
         3. 连接耗时: 扩大listen队列 accept并发
+    
+    1. 开篇词 | 为什么你要学习高并发系统设计?
+        · 低并发下只需要了解基本的使用方式,高并发下要关注缓存命中率、缓存击穿、雪崩、缓存一致性
+        · 消息队列解耦消息生产方和消费方,减少两方处理速度不一致问题
+            · 这里不仅仅为了处理速度不一致的问题
+            · 最基本的是 系统模块要遵循 高内聚、低耦合这个基本设计思想
+
+    2. 高并发系统:它的通用设计方法是什么?
+        · Scale-out 横向扩展
+            · 分布式的机器
+                · Scale-up 提升单台服务器的处理能力
+                    · 优先实现Scale-up, 超过极限后实现Scale-out
+                · Scale-out 增加服务器的数量
+                    · 节点故障后的整体可用性
+                    · 多个节点有状态要同步,如何保证信息在不同节点的一致性
+                    · 在客户端无感知的情况下,删除增加服务器
+        · 缓存
+            · 使请求快速的得到响应
+        · 异步
+            请求到来,处理来不及,可以让请求先返回,避免客户端等待;数据准备好以后再发给请求方, 服务端也可以处理更多的请求
+    4. 系统设计目标(一):如何提升系统性能?
+        · 高并发系统设计的三大目标:高性能、高可用、可扩展
+            · 高性能
+                毫秒级响应
+                · 性能优化
+                    · 性能的度量指标
+                        · 平均值
+                            30s内/1000次请求的平均响应时间
+                        · 最大值
+                            30s内/1000次请求的最大响应时间
+                        · 分位值
+                            不同百分位的响应时间统计
+                    · 提高系统的处理核心数
+                    · 减少单次任务响应时间
+                        · CPU密集
+                            算法优化 //使用linux的perf或者eBPF来发现CPU时间消耗最多的模块
+                        · IO密集
+            · 高可用 High Availability, HA
+                · 365天无故障
+                · Hadoop 一次启动2个进程,一个处于active状态, 一个处于standby状态;两者共享存储,一个发生故障了,就切换
+                · 可用性的度量 Availiability = MTBF/ (MTBF + MTTR)
+                    · 五个九 99.999% * 365天 = 32s
+                    · MTBF:Mean Time Between Failure
+                        两次故障的间隔时间
+                    · MTTR:Mean Time To Repair
+                        故障的恢复时间
+                · 高可用系统设计思路
+                    1. 系统设计 design for failue
+                        · failover 故障转移
+                            · 同级转移 热备,可以提供服务
+                            · 主备转移 冷备,刚切换到active状态
+                                · 主备切换, 涉及分布式一致性算法
+                                    Paxos、Raft
+                            ·检测故障
+                                心跳,客户端定时向服务端发送心跳包
+                        · 超时控制
+                            · 模块间的调用超时时间通过日志统计99%的响应时间来指定
+                            · 尽量在最短的时间内得不到答复就返回
+                        · 降级
+                            · 关闭不紧要的功能
+                        · 限流
+                            · 限制请求的数量
+                    2. 系统运维
+                        · 灰度发布
+                            10%部分的机器上发布新版本,观察性能数据在全量更新
+                        · 故障演练
+                            使某些部件出现故障,观察性能
+            · 高可扩展
+                1. 存储层的扩展性
+                    · 按照业务内容将数据库进行拆分;分库分表;最好不要用事务,协调的成本会很高
+                2. 业务层的扩展性
+                    · 把相同业务的服务超分成单独的业务池,每个业务池出现瓶颈时,就扩展这个单独的业务池
+                        · 继续划分为核心和非核心:非核心的可以降级处理,优先扩容核心池
+    5. 缓存;数据库成为瓶颈后,动态数据的查询要如何加速?
+        ·分布式缓存
+        · 热点本地缓存
+            遇到极端的热点数据查询的时候,热点本地缓存主要部署在应用服务器的代码中,用于阻挡热点查询对于分布式缓存节点或者数据库的压力;优势是不需要跨网络调度,速度极快,所以可以来阻挡短时间内的热点查询
+        · 缓存的读写策略
+            · Cache Aside(旁路缓存)策略
+                · 写请求来了,先写数据库,再删掉缓存
+                · 读请求来了,缓存没有击中,读数据库,写缓存;缓存击中,直接返回
+                · 写数据库比读数据库要慢, 读数据库-写缓存要比写数据库先执行,可以看成是原子的
+            · Read/Write Through (读穿/写穿)策略 
+                · 这种比上面的Cache Aside少见
+                · Write Through
+                    · 写请求来了,缓存击中了,更新缓存,再由缓存组件更新到数据库;没有击中,就“write miss”
+                        · miss之后, Write Allocate(按写分配).
+                            先写入缓存相应的位置,再由缓存组件更新到数据库中
+                        · miss之后, No Write Allocate(不按写分配).
+                            不写缓存,直接更新到数据库中(一般选这个)
+                · Read Through
+                    先查询缓存中数据是否存在,如果存在则直接返回;如果不存在,则由缓存组件负责从数据库中同步加载数据到缓存再返回数据
+            · Write Back(写回)策略
+                · 这种策略被用在内存写数据到磁盘中
+                · 这个策略的核心思想是在写入数据时只写入缓存,并且把缓存块儿标记为“脏”的。而脏块儿只有被再次使用时才会将其中的数据写入到后端存储中。 // 相比上面的同步,这里是异步的
+                · 在“Write Miss”的情况下,我们采用的是“Write Allocate”的方式,也就是在写入后端存储的同时要写入缓存,这样我们在之后的写请求中都只需要更新缓存即可
+                · 如果使用 Write Back 策略的话,读的策略也有一些变化了。我们在读取缓存时如果发现缓存命中则直接返回缓存数据。如果缓存不命中则寻找一个可用的缓存块儿,如果这个缓存块儿是“脏”的,就把缓存块儿中之前的数据写入到后端存储中,并且从后端存储加载数据到缓存块儿,如果不是脏的,则由缓存组件将后端存储中的数据加载到缓存中,最后我们将缓存设置为不是脏的,返回数据就好了
+    6. 消息队列
+        · 异步处理
+        · 流量控制
+        · 服务解耦
+        · 消息可靠性:数据不丢失
+        · Cluster:集群, 确保某个节点宕机不会导致服务不可用,消息也不能丢
+        1. 生产者-> 消息队列
+            这里可能丢失消息, 从生产者服务器发到消息队列服务器中,网络错误会丢包;网络抖动,可能导致发送超时,此时重试2-3次;这又会导致消息重复
+        2. 消息队列中丢失消息
+            队列没来得及消费,机器掉电了
+            · 消费者和生产者模拟TCP,使用sequence序列号来判断消息是否丢失
+                每次消费者收到的sequence都要+1才是对的
+                · 分布式的情况下
+                    在序列号的基础上,再加上指定分区号
+            · 确保消息到达
+                1. 生产者到消息队列采用ACK确认,如果不成功就重试
+                2. 消息队列持久化,将消息存盘
+                3. 消费者和消息队列也用ACK确认
+            · 双工通信的消息顺序
+                在消息里带上序列号
+            · kafka
+                · 提升网络IO性能
+                    发消息时,buffer达到一定数量了,才一起发出去. 减少IO调用次数
+                · 提升磁盘IO性能
+                    顺序读写的性能远高于随机读写,持久化存储消息的时候,写满一个文件,就接着写一个新的文件
+                · 读写缓存,读写比例1:1
+                    · 利用PageCache加速读写
+                        PageCache缓存磁盘上的文件,对应上面的write back策略
+                · ZeroCopy 零拷贝技术
+                    size_t sendfile(int out_fd/*限定这是网络套接字*/, int in_fd /*真实的文件*/, int offset, size_t count);
+                    kafka使用这个套接字将持久化的文件发送给消费者
+                · 数据的可靠性
+                    在不同节点上的多副本来解决数据可靠性问题,这样即使某个服务器掉电丢失一部分文件内容,它也可以从其他节点上找到正确的数据,不会丢消息。
+                · 保持缓存新鲜-只读缓存 读次数是写次数的几十倍
+                    · 尽量让缓存中的数据与磁盘上的数据保持同步
+                    · 定时读取磁盘到缓存中,更新缓存
+                    · 设置缓存过期时间,过期了就更新一下
+                · 缓存置换策略
+                    · LRU
+                        缓存要存那些数据
+                    · LRU 2Q
+                        在LRU的基础上增加-页面位置与尾部的距离这个条件。因为越是靠近尾部的数据,被访问的概率越大。
+
+        3. 消费的过程中丢失
+            网络抖动导致丢失或者异常导致消息没处理,这里如果丢失就不更新最后的结果就行
+        4. 只消费一次(保证消息的生产和消费过程是幂等的)
+            每条消息赋予一个唯一的ID,如果消息队列收到两个ID一致的就丢弃
+            消费者每次收到ID,在数据库中查一下,如果已经存在就丢弃
+        5. 减少消息延迟
+        6. 分布式事务
+            1. 开启事务->发送半消息(事务没提交之前,消费者看不到这个消息)到消息队列->在本地业务中创建订单,提交数据库事务->然后根据这个事务的执行结果决定提交还是回滚->成功了,消费者就可以看到这个消息并开始处理;否则看不到这个消息
+                提交事务抛异常,需要重试提交直到成功或者删除这个订单
+
+    7. RPC
+        1. RPC框架
+            · 数据收发
+                
+
+        2. 网络传输协议
+            序列化/反序列化
+
 }
 
 ;{    线程并发(同步互斥) C++并发编程实战 
@@ -32,15 +191,335 @@
     · SEND-ACK 发一次确认一次,吞吐量不高
 }
 
-;{    性能调优/linux 命令
+;{    性能调优/Linux命令 极客时间·系统性能调优必知必会
+    1. 基础设施优化
+        1. cpu缓存 L1:32K(一个是数据缓存,一个是指令缓存,cpu独有) L2:256K(cpu独有) L3:20M(各个CPU共享)
+            · 伪共享
+                不同CPU上L1共享不同的变量,在一行Cache Line上有两个变量,本来是共享X变量,结果在一行上的Y变量也在共享行列中,这个Y就属于伪共享(不该共享,却被共享到了一行)
+            · 缓存一致性
+                · 缓存锁,对各个CPU中的共享缓存加锁
+                · 当某个CPU的共享缓存被修改,就会通知其他CPU的cache无效
+                · Store Buffers
+                    · cpu0 修改L1缓存,需要在缓存一致性协议处通知其他CPU令其失效,然后返回来通知cpu0;于是引出Store Buffers
+                    · CPU0 修改L1缓存,存入Store Buffers(如果后续有读取的,就从Store Buffer中读取),然后发消息通知其他CPU无效化,无需等待其他CPU回应(异步),就可以继续执行指令
+                    · 等到其他的回应消息到达,再将store-buffer中的共享变量写入内存和其他cpu L1中
+                    
+            · cpu Cache Line, 和内存对齐,64字节
+                CPU cache 读取一片buffer的时候,一次会读64个字节;4字节的数组在使用的时候,会把后面64个字节一起放到L1的一line上;如果不够64字节,就会顺序的补足后续元素
+                // 4个字节的数组比8个字节的数组效率高就是因为4个字节附近的数据读取的多,cpu能快速访问
+            · 按照内存布局顺序访问会带来性能提升
+            · Nginx用Hash存储域名/http头部都是cache line大小的整数倍
+                和MMU一样数据是cache line的整数倍,可以避免cpu多次读内存;比如数据长度50,CPU就要读取两次
+            · perf
+                perf stat 查看cpu cache命中率
+            · 指令缓存
+                for (i in 1, 100) if (num[i] < 128) num[i] = 0;
+                sort(num);
+                这里先排序再遍历 比 先遍历再排序要快
+                · CPU分支预测器
+                    if/switch语句至少可以分为2段语句,分支预测器会提前把预测好的指令放到指令缓存中,加快cpu运行,有序的数据,预测性能更好
+                    · C/C++还提供预测分支概率工具, 帮助cpu预测
+                        #define likely(x) __builtin_expect(!!(x), 1)
+                        #define unlikely(x) __builtin_expect(!!(x), 0)
+                        if (likely(a == 1)) //预测 很有可能 a==1
+                        if (unlikely(a == 1)) //预测 不太可能 a==1
+            · 提升多核cpu下的缓存命中率
+                · 在cpu0 上运行的进程, 提前缓存的数据指令,因为进程切换到cpu1.那么上次的缓存就没用上.
+                · sched_setaffinity(pid_t pid, unsigned int cpusetsize, cpu_set_t *mask)
+                    设置进程/线程绑定到指定cpu上
+        2. 内存池
+            · 堆的调用受并发影响, 可以考虑在栈上分配内存
+        3. hash表管理亿级对象
+            · 面对海量的分布式服务,使用更多的空间建立索引,获取更快的查询速度
+            · Memcached/Redis都用哈希表管理数据
+            · hash<bitset>只用于判断对象存不存在,布隆过滤器用来解决缓存穿透
+            · 如果要查询指定元素附近元素,需要使用红黑树logN,内存不够,存储到磁盘上,用B+树
+            · 内存结构和序列化方案
+                1. 容灾
+                    · 每隔一天把哈希表备份到另一台服务器上
+                    · 服务器宕机, 先恢复隔天的备份数据恢复到hash表中,再通过log把一天内的数据载入到hash表,这就要求序列化和反序列化
+                    · 开放寻址法
+                        发生冲突的数据,依次在hash上平铺开来;然后使用mmap映射到文件中,msync刷新到磁盘;新的进程启动也可以重新映射恢复到hash表中
+                    · hash序列化
+                        1. hash装载因子接近1,就直接存盘
+                        2. 装载因子小,空余的空间大
+                            1. 数据的长度一致
+                                一个数组D存数据,另一个hash数组H每个桶存放数组D的下标
+                            2. 数据不一致
+                                不同长度的分别分成一类数组用来存数据,哈希表数组每个桶分i+j位,用来记录不同的数组以及位置
+                        3. 降低哈希表的冲突
+                            1. 优化哈希函数
+                                · 使用素数做数组大小
+                                    合数做数组大小, 以因子个数递增, 有些key永远都不能击中
+                            2. 扩容
+                                老的哈希表需要重新插入到新哈希表中,分为后台多次迁移,提供服务的同时根据迁移情况选择新老哈希表
+        4. 零拷贝
+            · 磁盘拷贝到PageCache,直接发送到网卡缓冲区;减少系统调用,避免内核/应用进程切换
+            · PageCache
+                · 现在PageCahe中找,找不到就要阻塞读取磁盘了;如果找到了就返回
+                · PageCache采用LRU算法,保留最近访问最多的,时间局部性;打开文件关闭后,再接着顺序读写磁盘,性能最高
+                · 预读功能
+                    类似CPU Cache, 读取0-32KB磁盘数据的时候会把读取指针之后的32-64KB也读取到PageCache中
+                · 大文件占据PageCache,利用率低不应该使用PageCahe
+            · 异步IO 只支持 直接IO(绕过PageCache直接发给应用buffer)
+                · 高并发场景处理大文件,应当使用异步IO和直接IO来替换零拷贝技术
+                · 读操作分两部分,前半部分向内核发起读请求,但不等待数据到位就立刻返回->此时可以做其他事->等IO完成后半部分,将数据拷贝到应用缓冲中->内核通知应用
+                · 直接IO的场景
+                    1. PageCahe已经缓存好磁盘数据了,不需要再次缓存
+                    2. 高并发下传输大文件, 占用资源
+                    3. 直接IO没法享受预读
+        5. 协程
+            · 零拷贝通过减少上下文切换(系统调用)次数提升文件传输的性能
+            · 高并发也是通过降低切换成本实现
+            · 多进程时间片轮换并发执行 缺点:
+                · 内核管理成本高
+                · 进程间内存同步不方便
+                · Nginx为了稳定性使用多进程
+            · 多线程
+                · 共享进程内存
+                · 多线程存在竞争问题
+                · 多进程、多线程都难以实现高并发
+                · 多线程在创建的时候,内存池还会预分配64M的内存,栈大小8M;一个线程就占了72M, 这就没有足够的线程并发开启几万个线程
+                · 线程还受CPU核心的限制,最多8倍个线程
+                · 线程切换
+                    · 时间片用尽
+                    · 线程被阻塞,内核为了让CPU充分工作,也会切换到其他线程执行
+                    · 线程切换需要时间,线程数多的情况下,线程切换就会消耗大量的CPU时间
+                    · 线程1----阻塞读---->内核---->磁盘1
+                        切换到线程2----阻塞读---->内核---->磁盘2
+                        线程1<---通知并返回--内核<---读盘写PageCache--磁盘1
+                        · 现在要实现并发
+                            1. 把上图中本来有内核实现的请求切换工作交给用户态来完成
+                                1. 异步化编程通过应用层代码实现了请求切换,降低了切换成本和内存占用空间
+                                2. 异步化编程依赖IO多路复用, 阻塞调用改异步调用,才能避免内核切换
+                                    · 线程向epoll注册读写事件,epoll在读写就绪时返回通知线程进行读写;读写未就绪时可以做其他事
+                                        · 这个异步化代码容易出错
+                                            1. epoll负责监听
+                                            2. 应用自己负责读写
+                                            3. 这违背了内聚性原则, epoll的监听和应用的读写分离
+            · 协程是如何实现高并发的
+                1. 和异步编程相似的地方
+                    · 使用非阻塞的系统调用和内核交互,切换请求由用户完成
+                2. 不同的地方
+                    · 协程把异步化的两段函数(epoll,用户读写),封装成一个阻塞的协程函数
+                        · 协程发起读请求,这个协程函数发出异步读,数据未就绪先切换到其他协程,等到数据就绪后,再切换回来
+                3. 协程栈 用户态的线程
+                    1. 从进程的堆中分配,线程栈有8M,协程栈一般几十K,C库内存池也不预分配
+                    2. 协程必须重新封装所有的阻塞系统调用,否则一旦线程切换,这个线程就会进入休眠,整个线程上的协程都得不到执行
+                        · 自己实现sleep,互斥锁等
+                    3. 设置该协程所在线程的优先级,绑定CPU(增加CPU缓存命中)
+        6. 平均负载
+            · uptime(1,、5、15分钟内的平均负载)
+                单位时间内,系统处于可运行状态和不可中断状态的平均进程数,也就是平均活跃进程数
+                · CPU密集型会导致平均负载升高
+                · IO密集型,等待状态下也会导致升高
+            · stress -c(进程数) --timeout(运行时间) 600
+            · mpstat -P ALL 5 查看所有CPU的运行状态
+            · pidstat -u 5 1 查看所有进程运行状态
+        7. 上下文切换
+            · vmstat -5可以查看线程上下文切换次数,CPU使用率,中断次数
+            · pidstat -wt 1 可以看到具体进程CPU使用率,线程上下文切换次数
+            · /proc/interrupts 
+                watch -d “cat /proc/interrupts|tail -20” 查看所有CPU某种中断的次数
+                Rescheduling interrupts表示调度中断
+        8. cpu占用率100%
+            // # -g 开启调用关系分析,-p 指定 php-fpm 的进程号 21515
+            $ perf top -g -p 21515 查看占用率高的函数栈
+                perf top以top的形式显示各种事件,默认cpu cycle
+                -g 显示调用堆栈、 -p指定进程
+            
+
+
+    2. 系统层网络优化
+        1. 性能好,效率高的一对多通讯该如何实现？
+            1. 广播
+                1 应用层广播一般不用IP层,选择UDP协议广播
+                    广播交由交换机分发,设置SO_BROADCAST选项
+                    1 只对子网广播,将目标IP设为255.255.255.255,交换机就会广播
+                    2 多个子网情况,将子网主机段设为11111
+                    3 路由器默认不转发广播报文,避免网络风暴
+            2. 组播
+                D类地址,组播前四位必须是1110,IP地址范围从224.0.0.0到239.255.255.255;通过IGMP协议,将IP地址加入虚拟组中,setsocket就可以操作IGMP协议管理组播地址
+                    · 使用IP_ADD_MEMBERSHIP就能向虚拟组中添加IP,IP_DROP_MEMBERSSHIP从组中去除某个主机IP
+        2. C10M
+            · 什么样的代码值得基于事件来做拆分呢？还得回到高性能这个最终目标上来。我们知道,做性能优化一定要找出性能瓶颈,针对瓶颈做优化性价比才最高。对于服务器来说,对最慢的操作做异步化改造,才能值回开发效率的损失。而服务里对资源的操作速度由快到慢,依次是 CPU、内存、磁盘和网络。CPU 和内存的执行速度都是纳秒级的,无须考虑事件驱动,而磁盘和网络都可以采用事件驱动的异步方式处理。
+                //磁盘和网络采用异步方式
+                · 相对而言,网络不只速度慢,而且波动很大,既受制于连接对端的性能,也受制于网络传输路径。把操作网络的同步 API 改为事件驱动的异步 API 收益最大。而磁盘(特别是机械硬盘)访问速度虽然不快,但它最慢时也不过几十毫秒,是可控的。而且目前磁盘异步 IO 技术还不成熟,它绕过了 PageCache 性能损失很大。所以当下的事件驱动,主要就是指网络事件。
+                    //磁盘读写虽然慢,但可控,所以主要针对网罗
+            · 该怎样处理网络
+                · select每次轮询的时候把套接字复制到内核缓冲区查询,然而要及时的处理网络IO就要每隔几十毫秒就要收集一次,性能消耗巨大
+                · epoll分两步来处理
+                    1. epoll_ctl将套接字传给内核
+                    2. epoll_wait就不用再传递套接字了,把轮询时候重复传递改成只传一次,降低性能损耗
+                        · 千兆网卡,每秒接收100MB数据,每个请求10KB,那么每秒就是1万个请求、10万个事件需要处理。
+                        · 每隔100毫秒epoll_wait轮询一次,每次就是1万个事件需要处理
+                        · 只要保证一个事件的平均时间小于10微妙(多核处理器可以做到),100毫秒内就可以处理完这10000个事件
+                        · 上面就做到了每秒1万次请求处理,这就是epoll在C10M下实现高吞吐量的原因
+                    3. 收到socket后,处理任何一个事件的耗时应该都是微妙或者毫秒级的,否则就会延误其他事件处理,因为100ms后就要轮询新的事件了,为了并发处理,就要压缩处理时间
+                    4. 压缩处理时间
+                        1. 计算任务
+                            虽然CPU和内存的速度很快,但是循环执行也可能耗时达到秒级,所以一定要引入密集计算才能完成的请求,为了不阻碍其他事件的处理,1. 放入独立的线程异步完成 2.分段完成,每次间隙的完成
+                        2. 读写磁盘
+                            · 写磁盘,使用了write back策略,write将应用缓冲的数据拷贝到PageCache并标记为Dirty返回,由内核择机将数据写进磁盘,所以这个写磁盘会很快
+                            · 读磁盘,读取比较慢的情况下,将大文件的读取分成多分,每次只读几十K,降低单词操作的耗时
+                        3. 网络访问
+                            将套接字设置为non_block模式
+        3. 提升TCP三次握手的性能
+            1. 三次握手占据一个HTTP请求的平均时间在10%以上,网络不佳、高并发或者SYN洪泛攻击下,如果不正确调整三次握手的参数就会对性能有很大的影响
+            2. 客户端优化
+                1. SYN_SENT
+                    客户端发出SYN;如果没收到ACK报文,就会重试,重试次数由/proc/sys/net/ipv4/tcp_syn_retries参数控制 默认6次
+                    1. 1s 2. 2s 3. 4s 4. 8s...依次重试,直到最后依然没有收到ACK,就会终止三次握手,总耗时超过2分钟
+                        · 内网通信一般不会长时间不回ACK报文,所以可以调低重试次数
+            3. 服务端优化
+                1. SYN_RECV
+                    服务端对客户端发出SYN+ACK后成SYN_RECV状态,服务端有一个SYN半连接队列来维护这个未完成的握手信息,这个队列溢满后,就不会有新的连接进来,所以扩大并发就要扩大这个队列
+                        · SYN半连接队列
+                            /proc/sys/net/ipv4/tcp_max_syn_backlog 默认值1024 允许同时1024个套接字等待三次握手
+                            因为超出1024个失败的,netstat -ano |grep "SYNs to LISTEN"
+                                这个可以查找到因为满1024被drop掉的连接次数
+                            · syncookies
+                                cat /proc/sys/net/ipv4/tcp_syncookies 默认值1
+                                0 表示关闭,1表示半连接队列满了,开启,2表示无条件开启;一般用1
+                                开启后,半连接队列满了也可以建立连接
+                            · ESTABLISHED
+                                客户端回复ACK后就成为ESTABLISHED,服务端收到ACK才变成ESTABLISHED;如果没有收到就会一直重发SYN+ACK报文,当网络繁忙,丢包就会严重,此时应该调大重发次数
+                                    ·cat /proc/sys/net/ipv4/tcp_synack_retries 默认值5 
+                                        和客户端的SYN重发类似;收到客户端的ACK后,内核就从半连接队列中移到accept连接队列中,等待accept取出;如果accept不能及时取出造成accept队列溢出,就会丢掉这个建立好的TCP连接
+                                    · cat /proc/sys/net/ipv4/tcp_abort_on_overflow 默认值0
+                                        1开启这个功能,只要服务器收到ACK但不回复,客户端就会一直重发;等到accept队列有空就可以进来;只有你非常确定accept队列会长期溢出时,才设置1开启
+                                    · accept队列长度
+                                        1. listen的backlog就可以设置,backlog等于半连接+连接的个数
+                                        2. backlog参数还受限于linux系统级的队列长度上限,一个端口监听的最大队列长度 4Kb
+                                            ·  cat /proc/sys/net/core/somaxconn 默认值4096
+                                        3. 查看accept连接队列溢出失败个数
+                                            netstat -s|grep "listen queue"
+                                        4. 调大backlog以及somaxconn
+                2 cat /proc/sys/net/ipv4/tcp_fastopen 默认1
+                    1. 表示作为客户端支持tcp_fastopen
+                    2. 表示作为服务器支持tcp_fastopen
+                    3. 都支持
+                    4. tcp_fastopen在第一次三次握手,从服务器下载一个aes加密的cookie;第二次之后的连接,就可以用这个cookie加到SYN报文中发送到服务器,在SYN报文中添加请求数据
+                        因为不用建立连接,所以用sendmsg/sendto 向指定的IP套接字发送请求
+        4. 提升tcp四次挥手的性能
+            · 先关闭连接的一方叫主动方,后关闭连接的叫被动方,一般服务器会是主动关闭连接的一方
+            · 挥手过程
+                1. 主动关闭连接的时候,被动方仍然可以在不调用close的状态下,长时间发送数据,此时处于半关闭状态(主动方关闭,被动方还在)。
+                2. FIN表示关闭所在端的写入,主动方会进入FIN_WAIT1阶段,等待被动方ACK,被动方内核收到FIN就会回ACK,进入CLOSE_WAIT(所在端还没关闭)。被动收到ACK就进入FIN_WAIT2,等待被动方也关闭。
+                3. 被动方在收到FIN,进入WAIT_CLOSE时,read返回0说明主动端发了FIN。被动方就针对性的调用close,进而发送FIN给主动端,此时被动方进入LAST_ACK,等待主动端的ACK。主动端在发送ACK之后,就进入CLOSE_WAIT,等待TIME_WAIT时间后就彻底关闭(CLOSED)。被动方收到ACK就彻底关闭(CLOSED)
+            · 主动方的优化
+                · 孤儿连接 orphan-conn
+                    close关闭读写,对方在半关闭状态下发送的数据,这时也读不到
+                    shutdown函数调用后,进入FIN_WAIT1或者FIN_WAIT2,仍然可以读到数据
+                · FIN_WAIT1->FIN_WAIT2
+                    一般只要数十毫秒(收到对方的ACK),只有迟迟没收到才可以用netstat看到FIN_WAIT1状态,此时内核会重发FIN报文,重发次数由tcp_orphan_retries参数控制
+                    · cat /proc/sys/net/ipv4/tcp_orphan_retries 默认值0表示8次
+                        · 控制FIN报文的重发
+                        · 如果FIN_WAIT1状态比较多,说明重发的FIN包多,这时候要降低tcp_orphan_retries次数,到达次数后连接就会直接关闭CLOSED
+                        · 一直发不出去可能是缓冲区还有数据还没发完;也有可能是对方在下载大文件时的接收窗口为0,这时候FIN就发不出去了
+                        · cat /proc/sys/net/ipv4/tcp_max_orphans 默认值65536
+                            close后的孤儿连接,超过这个值,就不再走四次挥手,而是发RST报文强制关闭连接
+                    · cat /proc/sys/net/ipv4/tcp_fin_timeout 默认值60
+                        主动方close进入FIN_WAIT2的持续时间不能太长,孤儿连接如果60s没收到FIN报文,就会直接关闭进入CLOSED
+                · TIME_WAIT
+                    主动方收到被动方的FIN报文后回复ACK,等待60s后关闭
+                    · MSL (Maximum Segment LifeTime 报文最长生存时间)30s
+                    设置为2MSL,可以保证在1MSL内丢包,2MSL重新收到;如果2MSL也丢失那么这个网络环境已经坏掉了
+                    · 端口占用 TIME_WAIT占用不少资源
+                        · cat /proc/sys/net/ipv4/tcp_max_tw_buckets 65536
+                            当TIME_WAIT的连接数量超过该参数时,新关闭的连接就不再经历TIME_WAIT而直接关闭
+                        · 当服务器的并发连接增多时,同时处于TIME_WAIT状态的连接数量也会变多,此时应该调大tcp_max_tw_buckets,减少不同连接间数据错乱的概率
+                    · tcp_max_tw_buckets也不能太大,毕竟内存和端口号都是有限的
+                    · cat /proc/sys/net/ipv4/tcp_tw_reuse 2
+                        · 1 表示开启,允许在安全条件下使用TIME_WAIT状态的端口
+                        · cat /proc/sys/net/ipv4/tcp_timestamps 
+                            · 客户端和服务端都要打开这个,在配合上面的参数一起用
+            · 被动方的优化
+                · 被动方收到FIN报文后,开始四次挥手流程,发出ACK后,进入CLOSE_WAIT状态,等待close调用
+                · linux没有限制CLOSE_WAIT状态的持续时间,对方如果用shutdown关闭,说明他还想在半关闭连接上收数据
+                · 当然,大多数应用程序并不使用 shutdown 函数关闭连接,所以,当你用 netstat 命令发现大量 CLOSE_WAIT 状态时,要么是程序出现了 Bug,read 函数返回 0 时忘记调用 close 函数关闭连接,要么就是程序负载太高,close 函数所在的回调函数被延迟执行了。此时,我们应当在应用代码层面解决问题。
+                · 在调用close后,发出FIN报文就进入LAST_ACK状态了,等待ACK回复,如果迟迟收不到ACK,内核就会重发FIN报文,重发次数由tcp_orphan_retries控制
+                · 如果同时发送FIN报文,都进入FIN_WAIT,结果在等ACK的过程中都等来了FIN报文,连接双方就会进入CLOSING状态,最终双方等不到ACK,就会一直重发FIN报文,最终关闭连接
+        5 如何修改TCP缓冲区才能兼顾并发数量与传输速度？
+            · C10K 到 C10M后,TCP占用的内存翻了1000倍,这也意味着TCP占用的内存翻了1000倍,服务器的内存资源会非常紧张
+            · free命令
+                · buff/cache 缓冲/缓存
+                    · 他是内核内存,与进程无关
+                    进程每新建一个TCP连接,buff/cache就会上升4K,当连接传输数据时,就远不止增加4K。几十万并发就在进程内存外增加了上G内存消耗
+                        · 这是因为TCP连接是由内核维护的,内核要为连接建立内存缓冲。太大了耗内存,太少了,无法充分使用网络带宽
+            · 滑动窗口是怎样影响传输速度的
+                · 发送报文没有收到ACK时,一段时间超时后,就会尝试重发,这时候,套接字缓冲区的报文还不能清空,重发还要用(内核buff/cache会增长的原因)
+                · 发送一个报文再等一个ACK,在发送
+                    发送一个报文的时间为RTT,一个1kb的报文需要10ms的话1kb/10ms=100K/s,可见这种确认报文方式太影响传输速度了
+                    · 提速方式
+                        · 并行的批量发送报文,再批量确认报文,MSS=1KB,那么就是10万个报文,等他们慢慢ack。并发的发送100MB文件,发送的瞬间速度就是100MB/10ms = 10G/s
+                · 滑动窗口大小在TCP报文窗口字段只有2个字节大小,也就是2^16 = 65535大小,0表示窗口关闭。那么这样计算,65K/10ms = 6MB/s,这显然不够
+                    · cat /proc/sys/net/ipv4/tcp_window_scaling 1
+                        扩充窗口设置1表示窗口的最大值可以达到1GB
+                        · 这样看来,进程的发送和接收缓冲也能足够大,那么传输量就会很大;但路由器不支持,超过了就会丢弃
+                · 带宽时延积如何确定最大传输速度
+                    · 100MB/s宽带,10ms内传输1MB个字节,TCP窗口大小就不能超过这个值
+                · 缓冲区动态调节功能
+                    cat /proc/sys/net/ipv4/tcp_wmem //4096	16384	4194304
+                        1. 发送缓冲区 4096代表动态的窗口下限,4194304代表上限,16384代表初始默认值
+                    cat /proc/sys/net/ipv4/tcp_rmem  //4096	131072	6291456
+                        1. 接收缓冲区同上
+                        2. 依据空闲系统内存的数量来调节接收窗口
+                             · cat /proc/sys/net/ipv4/tcp_moderate_rcvbuf //1
+                                开启接收缓冲区的调节功能 1表示开启
+                                cat /proc/sys/net/ipv4/tcp_mem //117480	156640	234960 
+                                    · 这是页面大小,表示4KB一个
+                                    · 当TCP内存小于第一个值,不需要自动调节;在1,2之间,内核开始调节接收缓冲区的大小,大于第三个值,内核不再为TCP分配新内存,此时无法建立连接
+                                    · 通过内核设置TCP缓冲区的动态调整功能,而不要在socket上直接设置SO_SNDBUF或者SO_RCVBUF
+        6 如何调整TCP拥塞控制的性能？
+            1. 慢启动阶段如何调整初始拥塞窗口
+                · 查看初始拥塞窗口大小
+                     ss -nli|grep cwnd //cubic cwnd:10 
+                · 修改初始拥塞窗口
+                    ip route | while read r; do
+                        ip route change $r initcwnd 10;
+                    done
+                    更大的初始拥塞窗口,更快的遭遇网络阻塞,更快的结束慢启动阶段
+            2 慢启动的结束
+                1. 定时器探测到丢包,等待超时了再重传
+                2. 拥塞窗口达到慢启动阈值ssthresh(slow start thresh)
+                3. 3次ack报文,快速重传,比超时快
+                4. 1,3场景,建议加大ssthresh值,快速发现网络瓶颈
+                5. 结束慢启动进入拥塞避免,用线性速度慢慢增加拥塞窗口
+            3. 快速恢复
+                出现三次ACK丢包后,进入快速恢复阶段,ssthresh变为一半,拥塞窗口变成一半;直到收到丢失的包之后才会进入拥塞避免阶段
+                · 查看内核支持的congestion拥塞算法
+                    cat /proc/sys/net/ipv4/tcp_available_congestion_control //reno cubic
+                · 设置congestion算法
+                    cat /proc/sys/net/ipv4/tcp_congestion_control //cubic
+            4. 基于测量的拥塞控制算法 congestion control
+                · 当开始出现丢包时,拥塞已经非常严重了;进行拥塞控制的最佳时间点,是缓冲队列刚出现积压的时刻,此时,网络时延会增高,但带宽维持不变,这两个数值的变化可以给出明确的拥塞信号
+                · 这种测量带宽、时延的方法被称为BBR算法
+                    cat /proc/sys/net/ipv4/tcp_congestion_control = BBR
+        7 单机如何实现管理百万主机的心跳服务
+            · 类似2MSL:考虑到网络报文的延迟,如果管理服务在几个上报周期内未收到心跳,则认为主机宕机
+            · 扩大端口范围
+                cat /proc/sys/net/ipv4/ip_local_port_range //32768	60999
+            · 定时向客户端探测连接是否存活
+                cat /proc/sys/net/ipv4/tcp_keepalive_time //7200
+            · 每次探测的最大等待时间
+                cat /proc/sys/net/ipv4/tcp_keepalive_intvl //75
+            · 保活重试次数
+                cat /proc/sys/net/ipv4/tcp_keepalive_probes //9
+            · 网络协议的选择
+                超过MTU选择TCP,TCP解决了流量控制、可靠性
+                小于MTU选择UDP,不用建立连接
+
+    3. 应用层编码优化
+    4. 分布式系统优化
 }
 
 ;{    ubus网络数据协议
     |blob_buf|
     |blob_buf.buf|
         |
-    |blob_attr.id_len(记录整个buf的大小) +blob_attr.data(0)|--------------------------------------------------------------|
-                                                          |blob_attr.idlen+blob_attr.data||blob_attr.idlen+blob_attr.data|
+    |blob_attr.id_len(记录整个buf的大小) +blob_attr.data(0)|-------------------------------------------------------------|
+                                                          |blob_attr.idlen+blob_attr.data|blob_attr.idlen+blob_attr.data|
                                                                                     |
                                                                             |blobmsg_hdr.name:value|
         · blob_attr{ 
@@ -51,11 +530,11 @@
                 (len + ALIGNMENT - 1) & ~( ALIGNMENT - 1 ) // a - 1 + n / a = 0, 1, 2 ··· a - 1 , 0, 1 ... a + 1;  n == 1, 1+a, 1+2a才增长
         · blob_buf {
             struct blob_attr *head; // 指向blob_buff的整个空间
-            bool (*grow)(struct blob_buf *buf, int minlen); // 控制blob_buf内存自动扩充，每次增加256个字节
+            bool (*grow)(struct blob_buf *buf, int minlen); // 控制blob_buf内存自动扩充,每次增加256个字节
             int buflen; // blob_buf长度
             void *buf; // 指向一块用blob_attr填充的空间
         }
-        · blob_buf_init // 初始化blob_buf, 控制自增，给buf填充第一个bob_attr空间
+        · blob_buf_init // 初始化blob_buf, 控制自增,给buf填充第一个bob_attr空间
         · blobmsg
             · blobmsg_json用于序列化到json
             · blobmsg_add_u32(&b, "id", 123);
@@ -82,7 +561,7 @@
                 · I/O复用
                     · select/poll/epoll_wait注册IO触发事件
                 · SIGIO
-                    · fcntl(int fd, SIGIO, void*args) // fd触发的时候，会收到SIGIO信号
+                    · fcntl(int fd, SIGIO, void*args) // fd触发的时候,会收到SIGIO信号
         8.4 事件处理模式
             · Reactor
                 · 主线程负责listen事件,工作线程自己从socket上读取客户请求并往socket写入服务器应答
@@ -142,7 +621,7 @@
 ;{    九章算法
     1. 如何快速得到子数组的和(双指针、前缀和数组)
         1. 前缀和数组
-            1. O（n^2）
+            1. O(n^2)
                 · num[10] = {1,2,3,4,5,6,7,8,9,10};
                 · 构造前缀和数组
                 int sum = 0;
@@ -360,7 +839,7 @@
                 ENOBUFS 发送缓冲区已满
     3. readv(int fd, const struct iovec*vector, int count);
         · struct iovec{
-            void *iov_base; // 如下，指向buffer地址
+            void *iov_base; // 如下,指向buffer地址
             size_t iov_len; // 指明使用的buffer长度
         };
 
@@ -382,7 +861,7 @@
             };
 
         struct msghdr{
-            void *msg_name; // 源地址，指向struct sockaddr的指针
+            void *msg_name; // 源地址,指向struct sockaddr的指针
             socklen_t msg_namelen;
             struct iovec *msg_iov;  //如上
             size_t msg_iovlen;  // msg_iov的个数
@@ -390,6 +869,10 @@
             socklen_t msg_controllen;
             int msg_flags;
         };
+        · 该函数从内核的接收缓冲区复制数据到应用缓冲
+            · 当内核中的数据比指定的缓冲区小时,会复制缓冲区中的所有数据到用户缓冲区,并返回数据的长度。
+            · 当内核接收缓冲区中的数据比用户指定的多时,会将用户指定长度len的接收缓冲区中的数据复制到用户指定地址,其余的数据需要下次调用接收函数的时候在复制
+        · udp无连接套接字收到的第一个msg_name是对方原地址
 
     6. sendmsg(int fd, struct msghdr *msg, int flags); // 同上 
     7. read/write可以对所有文件描述符使用
@@ -399,6 +882,9 @@
         recvmsg/sendmsg可以在struct msghdr中指定对方IP和控制信息,
             sendmsg用flags参数控制socket MSG_NOWAIT
             recvmsg用msg_flags参数控制
+    8. mmap
+        · 先分配虚拟内存,然后做虚拟内存-物理内存映射
+        · mmap映射文件,先分配虚拟内存,然后将虚拟内存映射到pagecache的物理地址上。读数据的时候,读到就直接返回;没读到,就会读磁盘,再复制到pagecache,也就是返回mmap映射的虚拟内存上
 
 }
 
@@ -413,15 +899,44 @@
     2. socketpair 双向管道,线程间通信
 
     3. signal信号
-        1. PCB的tast_struct数据结构带有一个sigaction数据结构
-        2. 系统检查收到信号的时机
-            1. 应用从系统调用返回之前检测是否收到信号
-            2. 时钟中断后, 中断返回之前,检测一次
-        3. sigaction设置信号对信号函数的映射
-        4. 信号发送进程给目标进程的信号标志设置1,回到用户空间,执行pause()将进程设置成可中断等待状态
-        5. schedule调度时, 遍历进程是否有注册信号的,设置对应的进程状态为就绪态
-        6. 在pause()从系统调用返回的时候,就会调用这个信号函数
-}
+        · signal底层由sigaction实现
+            · 可不可靠与安装函数无关,只与信号量有关,sigaction可以传递信息,signal不行
+            · task_struct结构中signal有关于本进程中未决信号的数据成员
+        · struct sigpending pending
+                struct sigqueue *head, *tail; // 存储消息信息
+                sigset_t signal;    // 信号集,位图存储信号集64个信号SIGMAX
+            };
+            · struct sigqueue{
+                        struct sigqueue *next; // 维护一个队列
+                        siginfo_t info; // 用来存储kill发来的消息信息
+            }
+                · 每次注册消息的时候,就给pending的signal设置位图
+                · kill发送消息时,添加一个sigqueue消息
+            · task_struct结构中pending有关于本进程中未决信号的数据成员
+            · 实时信号到达时,不管注册没注册,都会重新注册一次,同时再添加一个sigqueue
+            · 非实时信号到达时,如果已经有pending信号,就会丢弃当前信号
+        · 可靠信号与不可靠信号
+            · 信号值小于SIGRTMIN的信号都是不可靠信号
+            · 信号值位于SIGRTMIN和SIGRTMAX之间的信号都是可靠信号
+        · 实时信号和非实时信号(和可靠不可靠定义类似)
+            · 信号值小于SIGRTMIN的信号都是非实时信号
+            · 信号值位于SIGRTMIN和SIGRTMAX之间的信号都是实时信号
+            · 实时信号支持排队,非实时信号不支持排队
+        · 触发
+            · 如果信号发送给一个正在睡眠的进程,如果进程睡眠在可被中断的优先级上,则唤醒进程(中断优先级比进程当前执行优先级高,就会执行优先级高的);否则(不可中断)仅设置进程表中信号域相应的位(位图),而不唤醒进程。如果发送给一个处于可运行状态的进程,则只置相应的域即可。
+            · 内核处理一个进程收到的信号的时机是在一个进程从内核态返回用户态时。所以,当一个进程在内核态下运行时,软中断信号并不立即起作用,要等到将返回用户态时才处理。进程只有处理完信号才会返回用户态,进程在用户态下不会有未处理完的信号
+            1 进程在从系统调用返回之前检测是否收到信号
+            2 时间中断,中断执行完之前检测是否收到信号
+        · 处理信号有三种类型:
+            · 进程接收到信号后退出;
+            · 进程忽略该信号;
+            · 进程收到信号后执行用户设定用系统调用signal的函数。
+        · 信号的安装
+            · linux主要有两个函数实现信号的安装:signal()、sigaction()
+        · 信号的嵌套
+            sa_mask指定在信号处理程序执行过程中,哪些信号应当被阻塞。缺省情况下当前信号本身被阻塞,防止信号的嵌套发送,除非指定SA_NODEFER或者SA_NOMASK标志位。
+
+}   
 
 ;{    Cache cpu 操作系统45讲
     LRU 程序局部性:
@@ -794,7 +1309,7 @@
                     · 每隔30分钟或者一条链路的状态发生变化
                     · OSPF运行在IP层
                     · 这个使用LS中的Dijkstra算法
-                3. 自治系统间的路由选择 BGP（Boder Gateway Protocol）
+                3. 自治系统间的路由选择 BGP(Boder Gateway Protocol)
             12. 广播(broadcast routing)和多播路由(multicast routing)选择
                 1. 广播路由选择算法
                     1. 无控制洪泛
@@ -997,6 +1512,8 @@
 
 ;{    wine
     lightdm-kwin-xorg
+    0. wine-server
+        读取数据,读取一个request类型, read(fd, &val, sizeof(type)) != sizeof(type),  就要循环读;
     1. wine -> preloader ->wine
         client:
             fd_socket = server_connect();
@@ -1028,7 +1545,7 @@
 
                     data.tid = GetCurrentThreadId();
                     data.fd  = fd;
-                    if ((ret = sendmsg( fd_socket, &msghdr, 0 )) // 客户端给server发送写pipe端，和自己的线程id
+                    if ((ret = sendmsg( fd_socket, &msghdr, 0 )) // 客户端给server发送写pipe端,和自己的线程id
 
 
                 wine_server_send_fd( ntdll_get_thread_data()->wait_fd[1] );
@@ -1060,7 +1577,7 @@
 
                         vec.iov_base = (void *)&handle;
                         vec.iov_len  = sizeof(handle);
-                        ret = sendmsg( get_unix_fd( process->msg_fd ), &msghdr, 0 ); // thread给client：process->msg_fd发送一个cmsg_contorl = fd; msg_iov = SERVER_PROTOCOL_VERSION， 这个发送给客户端
+                        ret = sendmsg( get_unix_fd( process->msg_fd ), &msghdr, 0 ); // thread给client;process->msg_fd发送一个cmsg_contorl = fd; msg_iov = SERVER_PROTOCOL_VERSION, 这个发送给客户端
                         ...
                         fd = request_pipe[0];
                         if (!(thread->request_fd = create_anonymous_fd( &thread_fd_ops, fd, &thread->obj, 0 ))) // 线程成了读取端
@@ -1088,7 +1605,7 @@
 ;{    位图 bitset
         · 基础数据结构, 选用最长的整形unsgned long long/long, 分配静态数组array[N];
         · set接口
-            ((_Array[_Pos / _Bitsperword/*8bit * sizeof(unsigned long long)*/] // pos/(8*8) 确定在哪个base，pos%(8*8)确定在这个long的第几位
+            ((_Array[_Pos / _Bitsperword/*8bit * sizeof(unsigned long long)*/] // pos/(8*8) 确定在哪个base,pos%(8*8)确定在这个long的第几位
 			    & ((_Ty)1 << _Pos % _Bitsperword)) != 0);
         · 布隆过滤器
             · biset空间过大的情况下,key:0/1的空间利用率不够
@@ -1109,9 +1626,11 @@
             把两条独立的分支的修改合并进一条分支, 要想条分支都拥有全量代码,需要互相merge一次
         rebase
             1. 有2条分支, 取出最近的一系列修改, 复制一份留在原地
-            2. rebase合并的时候, 把另一条和复制的修改合并到一起
+            2. rebase [branch]合并的时候, 把当前分支拷贝一份,再合并到另一个分支后
             3. 现在表象就是在一条分支上的顺序开发, merge会有两条
     · HEAD
+        · HEAD是独立的指针,指向某个提交记录 // 使用git checkout [log]
+            branch也是一个指针指向某个提交记录 // 使用git branch -f [branch] [log]
         · cat .git/HEAD 查看当前HEAD指向
         · git symbolic-ref HEAD 对HEAD指向的引用进行解引用
         · 分离的HEAD
@@ -1120,12 +1639,180 @@
                 分离的HEAD指向提交记录,没指向分支
                     HEAD->log // git checkout commit, 就和分支分离了
     · 相对引用
-        · git checkout commit_id太长了不方便
-        · <分支名字>^[num] 从当前引用向前移动num个提交记录
-            此时指针指向HEAD^[num]
+        · git checkout log太长了不方便
+        · <分支名字>^^^^ 从当前引用向前移动n个^提交记录
+            此时指针指向HEAD - 4
+        · <分支名字>~[num] 从当前引用向前移动num个提交记录
+            此时指针指向HEAD~[num]
+        · 强制修改分支位置
+            git branch -f main [HEAD~4|log]; //移动分支到指定[main]分支的[HEAD~4|log]位置 
 
 
 
+
+}
+
+;{    通信协议MQTT
+    · mosquito 消息队列
+        读取数据时根据MQTT协议解包
+        · mosq->in_packet
+            read(sock_fd, &mosq->in_packet);
+        · mosq->msg_in
+            //QOS=2 发消息的时候,把消息压入msg_in队列
+                · inflight数据优先,queue数据压后,
+                · handle__publish()
+                    · db__message_insert()
+                        · db__ready_for_flight()
+                            DL_APPEND(mosq->msgs_in.inflight, message);
+                        · db__ready_for_queue()
+                            DL_APPEND(mosq->msgs_in->queued, msg);
+        · mosq->msg_out
+                · subs__send()
+                    · db__message_insert() 
+                        · db__ready_for_flight()
+                            DL_APPEND(mosq->msgs_out.inflight, message);
+                        · db__ready_for_queue()
+                            DL_APPEND(mosq->msgs_out->queued, msg);
+            · main_loop()
+                · db__message_write()
+                    · db__message_remove() //QOS=2 收到PUBCOMP时,删去消息
+                        DL_DELETE(msgs_in.inflight, item);
+                        DL_DELETE(msgs_out.inflight, item);
+                        write(msgs_out.inflight);
+                    · db__message_dequeue_first() //queue作为第二层缓冲,数据从queue转化到inflight
+                        DL_DELETE(msgs_in->queued, msg);
+                        DL_APPEND(msgs_in->inflight, msg);
+
+
+
+
+
+
+}
+
+;{    ubusd RPC
+    1. RPC invoke
+        client_method-----register_method------>ubusd-----avl.insert(method)------
+        client_invoke-----inovke(method)---->ubusd----avl_find(method)--->client_method
+    2. subcriber-notify 对特定topic的发送
+        client_register-----reg_subscriber(topic)-----ubusd---avl.insert----
+        client_subscriber----subscribe(topic)----->ubusd-----list_add(subscriber)
+        client_notify-----notify(topic)--->ubusd------>find_id(object)---->client_subscriber
+    3. event广播 想听广播消息的会收到
+        client_reg---reg(pattern)--->ubusd--avl.insert(pattern)---
+        client_event---send(pattern)--->ubusd---->avl.traverse(pattern)---send(client_reg)
+    4. ubusd
+        · 单个连接上来后,EPOLL_IN|EPOLL_OUT都走client_cb,有消息没写完,会进入pending队列,等到EPOLL_IN击中接着写;当前pending队列清空后,EPOLL_CTR(EPOLL_IN)只接受读事件,等到有消息没写完就压入pending队列,EPOLL_CTR(EPOLL_IN|EPOLL_OUT)再打开读写事件
+        · 这里没读完的数据 是因为recvmsg一次性读到了需要的数据,blob_buf头里记录了大小,先读到这个大小,再接着读后面的buffer
+        · client_fd = accept(UNIX_FD);
+            · cl->sock.fd = client_fd; cl->sock.cb = client_cb;
+                · client_cb()
+                    · ubus_msg_head()
+                        · cl->tx_queue[cl->txq_cur];
+                    · ubus_msg_writev()
+                    · ubus_msg_dequeue();
+                    · bytes = recvmsg(sock->fd, &msghdr, 0);
+                        · struct msghdr msghdr = {
+                                .msg_iov = &iov,
+                                .msg_iovlen = 1,
+                            };
+                            int offset = cl->pending_msg_offset;
+                            iov.iov_base = &cl->hdrbuf + offset;
+		                    iov.iov_len = sizeof(cl->hdrbuf) - offset;
+                        · cl->pending_msg_offset += bytes;
+                        · cl->pending_msg_fd = fd_buf.fd;
+                        · memcpy(&cl->pending_msg->hdr, &cl->hdrbuf.hdr, sizeof(cl->hdrbuf.hdr));
+		                    memcpy(cl->pending_msg->data, &cl->hdrbuf.data, sizeof(cl->hdrbuf.data));
+                    · ub = cl->pending_msg;
+                        · ubusd_proto_receive_message()
+                            · ubus_msg_send(cl, retmsg, false);
+                                · written = ubus_msg_writev(cl->sock.fd, ub, 0);
+                                    · ubus_msg_enqueue(cl, ub);
+                                        // 收到对方的请求,解析INVOKE啥的,转发调用,发送给服务提供者
+                                        //如果没有写完就加入队列,下次接着写
+
+
+            · avl.insert(&clients, id);
+
+
+        
+}
+
+;{    文件
+    · inode
+        iNode对应文件,文件被写入到磁盘持久化,占用磁盘空间
+    · dentry
+        由内核维护的一个树状数据结构
+        
+
+}
+
+;{    mysql
+    1 mysql驱动
+        · mysql驱动和数据库建立网络连接,通过驱动发送请求给数据库
+            · 每次建立一个socket连接,执行SQL语句,再关闭;这种创建销毁比较浪费,可以考虑重用连接
+            · 创建一个数据库连接池(DBCP,C3P0,DRUID) //类似线程池,创建销毁造成费时
+                不同的线程根据需要来取
+            · 数据库作为服务器收到SQL请求,执行操作
+    2. 数据库服务器
+        · 查询解析器
+            解析sql语句
+        · 查询优化器
+            查询路径树,找出最优的查找
+        · 执行器
+            调用存储引擎的接口执行SQL语句
+        · 存储引擎InnoDB、MyISAM、Memory
+            目前使用InnoDB,执行sql语句的地方
+    3. InnoDB
+        1 缓冲池
+            · 类似pagecache,缓存磁盘的数据到内存中,
+                · 如果读取到了,就直接返回结果;否则就要继续读磁盘;
+                · 写会有独占锁,写缓存,标记脏页,等待落盘
+        2 undo日志
+            · 在更新之前,会先写入到undo日志中,等待回滚
+            · 提交事务之前,可以回滚到之前的数据
+        3 写数据
+            1. 先加锁,原来的数据写入undo,写缓存,标记脏页,写数据库
+        4 redo日志 buffer
+            · 避免宕机,内存数据丢失
+            · 每次内存中写入的数据都会生成一个redo buffer
+            · 提交事务的时候将redo写入到磁盘中
+                · 没提交的事务,相当于也没修改
+        5 mysql后台线程定时刷新IO到磁盘
+            IO没写入到磁盘中的数据,会在重启后,将数据redo加载到内存中,重新写入磁盘
+    4 SQL隔离级别
+        · read committed
+            不会脏写/脏读,不同的两个事务,不会出现读写一半被回滚
+        · repeatable read
+            不会脏写/脏读/不可重复读
+    5 Mysql隔离
+        set SESSION transaction isolation LEVEL [REPEATABLE READ|READ COMMIT];
+    6. 多个事务并发写某条数据,会加锁
+    7. 数据库的写和读是读写锁,写的时候独占,读的时候共享
+    8 索引 B+树
+        · 在单独的建一个数据页到最小主键的链表,通过这个主键目录快速找到对应的数据页
+        · 最后由于数据的增多,就会变成一棵树
+    
+
+
+
+}
+
+;{    https http over SSL/TLS
+    1 http
+        · http over TCP/IP
+    2 SSL Secure Sockets Layer
+        收发报文不再用socket API,而是调用专门的安全接口
+    3 TLS v1.2
+        · SSL v3.1现在改名成TLS 最新v1.2
+        · TLS 由记录协议、握手协议、警告协议、变更密码规范协议、扩展协议等几个子协议组成,综合使用了对称加密、非对称加密、身份认证等许多密码学前沿技术
+        · 混合加密
+            1 非对称加密 客户端存有公钥,服务端存有私钥;
+                · 现在通过非对称加密RSA通道,在客户端和服务端之间发送数据(这个数据即使被第三方抓取,也是不知道的)
+            2 对称加密
+                · 通过刚刚建立的加密通道,对称加密AES-CBC(DES,这属于块加密,还有流加密)的秘钥就可以加密传输到对端,两边都有AES解密秘钥
+                · 现在就只用对称加密了,因为非对称加解密的耗时比对称加密多两个量级
+                · 客户端向服务端发送加密的用户名/密码,服务端接收后,解密用户名和密码,同数据库作比较
 }
 
 ;{    设计模式 设计模式:可复用面向对象软件的基础
@@ -2014,4 +2701,790 @@
                     3. Iterator可以遍历一个聚合,vistor可以作为参数对这些元素进行一个操作
                 2. 行为模式也能和其他模式协同工作
                     1. composite可以使用vistor对符合的成分进行一些操作;chain of responsibility可以通过composite通过父类访问某些全局属性;decorator 可以对composite的某些部分进行改写;它可以使用observer将一个对象结构和另一个对象结构联系起来;它可以使用state模式使一个构件在状态改变时改变自身的行为;composite可以使用builder创建
+}
+
+;{    网络数据包收发流程
+
+    1. NAPI : 采用 中断 + 轮询 的方式:mac收到一个包来后会产生接收中断,但是马上关闭。
+        直到收够了netdev_max_backlog个包(默认300), 或者收完mac上所有包后,才再打开接收中断
+        通过sysctl来修改 net.core.netdev_max_backlog
+        或者通过proc修改 /proc/sys/net/core/netdev_max_backlog
+
+    2. 每个网络设备(MAC层)都有自己的net_device数据结构,这个结构上有napi_struct
+        每当收到数据包时,网络设备驱动会把自己的napi_struct挂到CPU私有变量上。
+        这样在软中断时,net_rx_action会遍历cpu私有变量的poll_list
+        执行上面所挂的napi_struct结构的poll钩子函数,将数据包从驱动传到网络协议栈。
+        ---------------------
+        |网卡    ->  CPU    |
+        |soft_data|soft_data|
+        |poll_list|poll_list|
+
+    3. 初始化网络相关的全局数据结构,并挂载处理网络相关软中断的钩子函数
+        start_kernel()
+            --> rest_init()
+            --> do_basic_setup()
+            --> do_initcall
+            --> net_dev_init
+            ```
+                定义:
+                subsys_initcall(net_dev_init);
+                #define subsys_initcall(fn) __define_initcall("4",fn,4)
+                扩展到:
+                static initcall_t __initcall_net_dev_init4 __attribute_used__ __attribute__((__section__(".initcall" "4" ".init"))) = net_dev_init
+
+                调用:
+                for (call = __initcall_start; call < __initcall_end; call++) 
+                    result = (*call)();
+            ```
+
+            ```
+            	for_each_possible_cpu(i) {
+                    struct softnet_data *queue;
+
+                    queue = &per_cpu(softnet_data, i); // CPU私有变量, per_cpu来获取
+                    ```
+                        DEFINE_PER_CPU(struct softnet_data, softnet_data);
+                        #define DECLARE_PER_CPU(type, name) extern __percpu __attribute__((section(.data..percpu))) __typeof__(type) name
+                        在.data..percpu区定义一个softnet_data结构
+                    ```
+                    skb_queue_head_init(&queue->input_pkt_queue); //初始化sk_buff接收队列
+                    queue->completion_queue = NULL; //初始化sk_buff处理完成队列
+                    INIT_LIST_HEAD(&queue->poll_list); //
+
+                    queue->backlog.poll = process_backlog;
+                    queue->backlog.weight = weight_p;
+                }
+
+                netdev_dma_register(); // 注册DMA
+
+                open_softirq(NET_TX_SOFTIRQ, net_tx_action, NULL); //在软中断上挂网络发送handler
+	            open_softirq(NET_RX_SOFTIRQ, net_rx_action, NULL);  //在软中断上挂网络接收handler
+            ```
+
+    4. 加载网络设备的驱动
+        在网络设备驱动中创建net_device数据结构,并初始化其钩子函数 open(),close() 等
+        挂载TSEC的驱动的入口函数是 gfar_probe
+        ```
+        /* Structure for a device driver */
+        static struct platform_driver gfar_driver = {
+            .probe = gfar_probe,
+            .remove = gfar_remove,
+            .driver	= {
+                .name = "fsl-gianfar",
+            },
+        };
+        ```
+
+        ```
+        static int gfar_probe(struct platform_device *pdev)
+        {
+            struct net_device *dev = NULL;
+            dev = alloc_etherdev(sizeof (*priv)); // 创建一个net_dev
+            if (einfo->device_flags & FSL_GIANFAR_DEV_HAS_MULTI_INTR) 
+            {
+                priv->interruptTransmit = platform_get_irq_byname(pdev, "tx");
+                priv->interruptReceive = platform_get_irq_byname(pdev, "rx"); //从设备树里获取设备中断号
+                priv->interruptError = platform_get_irq_byname(pdev, "error");
+            }
+
+            dev->open = gfar_enet_open;
+            dev->hard_start_xmit = gfar_start_xmit;
+            dev->tx_timeout = gfar_timeout; // 设置dev的回调函数
+            netif_napi_add(dev, &priv->napi, gfar_poll ,GFAR_DEV_WEIGHT); //软中断里会调用poll钩子函数
+
+        };
+        ```
+
+    5. 启用网络设备
+        5.1 用户调用ifconfig等程序,然后通过ioctl系统调用进入内核
+            socket的ioctl()系统调用
+            --> sock_ioctl()
+            --> dev_ioctl()                              //判断SIOCSIFFLAGS
+            --> __dev_get_by_name(net, ifr->ifr_name)  //根据名字选net_device
+            --> dev_change_flags()                  //判断IFF_UP
+            --> dev_open(net_device)             //调用open钩子函数
+
+            对于TSEC来说,挂的钩子函数是 gfar_enet_open(net_device)
+
+        5.2 在网络设备的open钩子函数里,分配接收bd,挂中断ISR(包括rx、tx、err)
+            对于TSEC来说gfar_enet_open
+                --> 给Rx Tx Bd 分配一致性DMA内存
+                --> 把Rx Bd的“EA地址”赋给数据结构,物理地址赋给TSEC寄存器
+                --> 把Tx Bd的“EA地址”赋给数据结构,物理地址赋给TSEC寄存器
+                --> 给 tx_skbuff 指针数组 分配内存,并初始化为NULL
+                --> 给 rx_skbuff 指针数组 分配内存,并初始化为NULL
+
+                --> 初始化Tx Bd
+                --> 初始化Rx Bd,提前分配存储以太网包的skb,这里使用的是一次性dma映射
+                (注意: #define DEFAULT_RX_BUFFER_SIZE  1536 保证了skb能存一个以太网包)
+                --> startup_gfar
+                    txbdp = priv->tx_bd_base;
+                    rxbdp = priv->rx_bd_base;
+                        ```
+                    	for (i = 0; i < priv->rx_ring_size; i++) {
+                            struct sk_buff *skb = NULL;
+                            rxbdp->status = 0;
+                            skb = gfar_new_skb(dev, rxbdp); //这里真正分配skb,并且初始化rxbpd->bufPtr, rxbdpd->length
+                            priv->rx_skbuff[i] = skb; //RXBDP和 SK_BUFF映射起来
+                            rxbdp++;
+                        }
+                        rxbdp--;
+                        rxbdp->status |= RXBD_WRAP; // 给最后一个bd设置标记WRAP标记
+                        ```
+
+                --> 注册TSEC相关的中断handler: 错误,接收,发送
+                    request_irq(priv->interruptError, gfar_error , 0, "enet_error", dev)
+                    request_irq(priv->interruptTransmit, gfar_transmit , 0, "enet_tx", dev) // 注册TX中断号, 包发送完
+                    request_irq(priv->interruptReceive, gfar_receive , 0, "enet_rx", dev) // 注册RX中断号, 包接收完
+
+                -->gfar_start(net_device)
+                    // 使能Rx、Tx
+                    // 开启TSEC的 DMA 寄存器
+                    // Mask 掉我们不关心的中断event
+
+    6. 中断里接收以太网包
+        TSEC的RX已经使能了,网络数据包进入内存的流程为:
+            网线 --> Rj45网口 --> MDI 差分线
+            --> bcm5461(PHY芯片进行数模转换) --> MII总线
+            --> TSEC的DMA Engine 会自动检查下一个可用的Rx bd
+            --> 把网络数据包 DMA 到 Rx bd 所指向的内存,即skb->data -> 触发网卡中断
+
+        6.1 网卡驱动的接收中断处理函数
+            irqreturn_t gfar_receive(int irq, void *dev_id)
+            {
+                if (netif_rx_schedule_prep(dev, &priv->napi)) {
+                    tempval = gfar_read(&priv->regs->imask);
+                    tempval &= IMASK_RX_DISABLED;
+                    gfar_write(&priv->regs->imask, tempval);
+
+                    __netif_rx_schedule(dev, &priv->napi);
+                        -> list_add_tail(&n->poll_list, &__get_cpu_var(softnet_data).poll_list); // 将DMA过来的数据加到cpu私有变量中
+                        -> __raise_softirq_irqoff(NET_RX_SOFTIRQ); //主动触发NET_RX_SOFTIRQ中断
+                }
+            }
+
+        6.2 网络接收 软中断net_rx_action
+            static void net_rx_action(struct softirq_action *h)
+            {
+                struct list_head *list = &__get_cpu_var(softnet_data).poll_list;
+                while (!list_empty(list)) {
+                    struct napi_struct *n;
+                    n = list_entry(list->next, struct napi_struct, poll_list); // 取出poll_list
+                    if (test_bit(NAPI_STATE_SCHED, &n->state))
+                    {
+                        work = n->poll(n, weight); // 调用驱动poll()函数
+                        ```
+                            static int gfar_poll(struct napi_struct *napi, int budget)
+                            {
+                                struct gfar_private *priv = container_of(napi, struct gfar_private, napi);
+	                            struct net_device *dev = priv->dev;
+
+                                int howmany = gfar_clean_rx_ring(dev, budget); // 根据dev的rx bd,获取skb并送入协议栈,返回处理的skb的个数,即以太网包的个数
+
+                                // 下面这个判断比较有讲究的
+                                // 收到的包的个数小于budget,代表我们在一个软中断里就全处理完了,所以打开 rx硬中断
+                                // 要是收到的包的个数大于budget,表示一个软中断里处理不完所有包,那就不打开 rx硬中断 ,
+                                // 此次软中断的下一轮循环里 再接着处理,直到包处理完(即howmany rx硬中断
+                                if (howmany < budget) {
+		                            netif_rx_complete(dev, napi); //del form poll_list
+                                    gfar_write(&priv->regs->rstat, RSTAT_CLEAR_RHALT);
+                                    //打开 rx 硬中断,rx 硬中断是在gfar_receive()中被关闭的
+                                    gfar_write(&priv->regs->imask, IMASK_DEFAULT);
+                                }
+                            }
+
+                            int gfar_clean_rx_ring(struct net_device *dev, int rx_work_limit)
+                            {
+                                struct rxbd8 *bdp;
+                                struct gfar_private *priv = netdev_priv(dev);
+                                /* Get the first full descriptor */
+                                bdp = priv->cur_rx;
+
+                                while (!((bdp->status & RXBD_EMPTY) || (--rx_work_limit < 0))) {
+                                    skb = priv->rx_skbuff[priv->skb_currx];
+                                    if (!(bdp->status & (RXBD_LARGE | RXBD_SHORT | RXBD_NONOCTET
+                                    | RXBD_CRCERR | RXBD_OVERRUN | RXBD_TRUNCATED))) {
+                                        pkt_len = bdp->length - 4; //从length中去掉以太网包的FCS长度
+                                        gfar_process_frame(dev, skb, pkt_len);
+                                        dev->stats.rx_packets++;
+                                        dev->stats.rx_bytes += pkt_len;
+                                    }
+
+                                    dev->last_rx = jiffies;
+
+                                    /* Add another skb for the future */
+                                    skb = gfar_new_skb(dev, bdp);
+                                    priv->rx_skbuff[priv->skb_currx] = skb;
+
+                                    /* Update to the next pointer */
+                                    if (bdp->status & RXBD_WRAP)
+                                        bdp = priv->rx_bd_base;
+                                    else
+                                        bdp++;
+
+                                    		/* update to point at the next skb */
+                                    priv->skb_currx = (priv->skb_currx + 1) & RX_RING_MOD_MASK(priv->rx_ring_size);
+                                }
+
+                                priv->cur_rx = bdp;
+                            }
+
+                            /* gfar_process_frame() -- handle one incoming packet if skb * isn't NULL.  */
+                            static int gfar_process_frame(struct net_device *dev, struct sk_buff *skb, int length)
+                            {
+                                skb->protocol = eth_type_trans(skb, dev); //确定网络层包类型,IP、ARP、VLAN等等
+                                ret = RECEIVE(skb); //netif_receive_skb(skb)
+                            }
+                        ```
+                    }
+                }
+
+                //以太网的FCS会在网卡中断 (如gfar_clean_rx_ring) 中忽略掉
+                /* Remove the FCS from the packet length */
+                pkt_len = bdp->length - 4;
+
+                //至于填充数据,是在协议栈中被忽略掉的,比如ip协议 ip_rcv()
+                /* Our transport medium may have padded the buffer out. Now we know it
+                * is IP we can trim to the true length of the frame.
+                * Note this now means skb->len holds ntohs(iph->tot_len).
+                */
+                if (pskb_trim_rcsum(skb, len)) {
+                    IP_INC_STATS_BH(IPSTATS_MIB_INDISCARDS);
+                    goto drop;
+                }
+            }
+
+    7. 进入二层协议处理函数
+        netif_receive_skb
+            list_for_each_entry_rcu(ptype, &ptype_all, list) { // 所有数据报文在这里都不会处理
+                if (!ptype->dev || ptype->dev == skb->dev) {
+                    if (pt_prev)
+                        ret = deliver_skb(skb, pt_prev, orig_dev);
+                    pt_prev = ptype;
+                }
+            }
+
+            #if defined(CONFIG_BRIDGE) || defined (CONFIG_BRIDGE_MODULE)
+                skb = handle_bridge(skb, &pt_prev, &ret, orig_dev); // bridge的skb->pkt_type == PACKET_HOST, PACKET_OTHER_HOST
+                ```
+                        static int __init br_init(void){
+                            br_handle_frame_hook = br_handle_frame;
+                        }
+                ```
+                if (!skb)
+                    goto out;
+            #endif
+
+            #if defined(CONFIG_MACVLAN) || defined(CONFIG_MACVLAN_MODULE)
+                skb = handle_macvlan(skb, &pt_prev, &ret, orig_dev); // bridge的skb->pkt_type == PACKET_BROADCAST, PACKET_MULTICAST, PACKET_HOST
+                ```
+                    static int __init macvlan_init_module(void)
+                    {
+                        macvlan_handle_frame_hook = macvlan_handle_frame;
+                    }
+                ```
+                if (!skb)
+                    goto out;
+            #endif
+            type = skb->protocol;
+            list_for_each_entry_rcu(ptype, &ptype_base[ntohs(type)&15], list) {
+                ```
+                    static struct list_head ptype_base[16] __read_mostly;	/* 16 way hashed list */
+                    static int __init inet_init(void)
+                    {
+                        dev_add_pack(&ip_packet_type);
+                        ```
+                            void dev_add_pack(struct packet_type *pt)
+                            {
+                                hash = ntohs(pt->type) & 15;
+                                list_add_rcu(&pt->list, &ptype_base[hash]);
+                            }
+                        ```
+                        ```
+                            static struct packet_type ip_packet_type = {
+                                .type = __constant_htons(ETH_P_IP),
+                                .func = ip_rcv,
+                                .gso_send_check = inet_gso_send_check,
+                                .gso_segment = inet_gso_segment,
+                            };
+                        ```
+                    }
+                ```
+                if (ptype->type == type &&
+                    (!ptype->dev || ptype->dev == skb->dev)) {
+                    if (pt_prev)
+                        ret = deliver_skb(skb, pt_prev, orig_dev);
+                    pt_prev = ptype;
+                }
+
+                if (pt_prev) {
+                    ret = pt_prev->func(skb, skb->dev, pt_prev, orig_dev); //ip_rcv arp_rcv
+                }
+            }
+}
+
+;{    伪文件系统
+    1. socketfs
+        1.1 sys_socket
+            ```
+                retval = sock_create(family, type, protocol, &sock);
+                retval = sock_map_fd(sock); // sock - file - fd 联系在一起
+                    int err = sock_attach_fd(sock, newfile);
+                        SOCK_INODE(sock)->i_fop = &socket_file_ops; //inode_ops - sock_file_ops
+                        ```
+                            static const struct file_operations socket_file_ops = {
+                                .owner =	THIS_MODULE,
+                                .llseek =	no_llseek,
+                                .aio_read =	sock_aio_read,
+                                .aio_write =	sock_aio_write,
+                                .poll =		sock_poll,
+                                .unlocked_ioctl = sock_ioctl,
+                            #ifdef CONFIG_COMPAT
+                                .compat_ioctl = compat_sock_ioctl,
+                            #endif
+                                .mmap =		sock_mmap,
+                                .open =		sock_no_open,	/* special open code to disallow open via /proc */
+                                .release =	sock_close,
+                                .fasync =	sock_fasync,
+                                .sendpage =	sock_sendpage,
+                                .splice_write = generic_splice_sendpage,
+                            };
+
+                            open
+                            -> sys_open
+                            -> do_sys_open
+                            -> do_filp_open
+                            -> nameidata_to_filp
+                            -> __dentry_open
+                            	-> if (!open && f->f_op)
+                                    open = f->f_op->open;
+                                if (open) 
+                                    error = open(inode, f);
+
+                            static struct file *__dentry_open(struct dentry *dentry, struct vfsmount *mnt,
+                                                int flags, struct file *f,
+                                                int (*open)(struct inode *, struct file *))
+                            {
+                                f->f_op = fops_get(inode->i_fop); // file_ops - inode_ops - socket_file_ops
+                            }
+                        ```
+            ```
+    2. procfs
+        2.0 open/read/write参考socketfs的dentry_open
+        2.1 初始化
+            start_kernel()
+                ->proc_root_init()
+                    ->register_filesystem(&proc_fs_type);
+                    ```
+                        static struct file_system_type proc_fs_type = {
+                            .name		= "proc",
+                            .get_sb		= proc_get_sb,
+                            .kill_sb	= proc_kill_sb,
+                        };
+                    ```
+                    ->proc_sys_init()
+                        -> proc_sys_root->proc_iops = &proc_sys_inode_operations;
+	                    -> proc_sys_root->proc_fops = &proc_sys_file_operations;
+                    ->proc_tty_init()
+                        -> entry->proc_fops = &proc_tty_drivers_operations;
+
+        2.2 挂载文件系统(/proc根目录)
+            mount -t proc proc /proc
+            ->.get_sb		= proc_get_sb
+            -> proc_fill_super(sb);
+                -> s->s_op = &proc_sops; //主要是通过proc_fill_super填充超级块实例
+                -> root_inode = proc_get_inode(s, PROC_ROOT_INO, &proc_root); // 指定根结点的回调为 proc_root
+                    //创建文件系统根目录项dentry实例,并关联proc_inode.vfs_inode成员
+                    -> 		if (de->proc_fops) {
+                                if (S_ISREG(inode->i_mode)) {
+                    #ifdef CONFIG_COMPAT
+                                    if (!de->proc_fops->compat_ioctl)
+                                        inode->i_fop =
+                                            &proc_reg_file_ops_no_compat;
+                                    else
+                    #endif
+                                        inode->i_fop = &proc_reg_file_ops;
+                                }
+                                else
+                                    inode->i_fop = de->proc_fops;
+                            }
+                ```
+                    struct proc_dir_entry proc_root = {
+                        .low_ino	= PROC_ROOT_INO, 
+                        .namelen	= 5, 
+                        .name		= "/proc",
+                        .mode		= S_IFDIR | S_IRUGO | S_IXUGO, 
+                        .nlink		= 2, 
+                        .count		= ATOMIC_INIT(1),
+                        .proc_iops	= &proc_root_inode_operations,  // proc_inode.iops
+                        .proc_fops	= &proc_root_operations,    //proc_inode.fops
+                        .parent		= &proc_root,
+                    };
+                ```
+                总结: 
+                    1. 挂载操作将创建proc文件系统超级块super_block实例,文件系统根目录项dentry实例,以及proc_inode实例。proc_inode实例中包含节点inode结构体成员,其i_op、i_fop成员分别指向proc_root实例中proc_iops、proc_fops指向的实例。
+                    2. 对于根节点,proc_iops、proc_fops指向的实例是专用的,它们分别为proc_root_inode_operations、proc_root_operations。
+                    3. 用户打开proc文件系统中文件时,将为每个路径分量(目录项)创建dentry和proc_inode实例,并建立proc_inode实例与proc_dir_entry实例之间的关联。
+
+        2.3 添加普通目录项
+            向proc文件系统添加普通目录项的接口函数为proc_mkdir()
+            proc_mkdir
+            -> proc_mkdir_mode(name, S_IRUGO | S_IXUGO, parent);
+                -> proc_create(&parent, name, S_IFDIR | mode, 2); 
+                    -> proc_register(parent, ent)
+                        -> if (S_ISDIR(dp->mode)) {
+                                if (dp->proc_iops == NULL) {
+                                    dp->proc_fops = &proc_dir_operations;
+                                    dp->proc_iops = &proc_dir_inode_operations;
+                                }
+                                dir->nlink++;
+                            } else if (S_ISLNK(dp->mode)) {
+                                if (dp->proc_iops == NULL)
+                                    dp->proc_iops = &proc_link_inode_operations;
+                            } else if (S_ISREG(dp->mode)) {
+                                if (dp->proc_fops == NULL)
+                                    dp->proc_fops = &proc_file_operations;
+                                if (dp->proc_iops == NULL)
+                                    dp->proc_iops = &proc_file_inode_operations;
+                            }
+                            dir->subdir = dp;
+        2.4 打开文件
+            在打开文件的操作中将调用proc_get_inode()函数为proc_dir_entry实例创建proc_inode实例,如果实例代表的是普通文件,则inode实例关联的文件操作结构实例设为proc_reg_file_ops,定义如下
+            ```
+                static const struct file_operations proc_reg_file_ops = {
+                    .llseek		= proc_reg_llseek,
+                    .read		= proc_reg_read,
+                    .write		= proc_reg_write,
+                    .poll		= proc_reg_poll,
+                    .unlocked_ioctl	= proc_reg_unlocked_ioctl,
+                #ifdef CONFIG_COMPAT
+                    .compat_ioctl	= proc_reg_compat_ioctl,
+                #endif
+                    .mmap		= proc_reg_mmap,
+                    .open		= proc_reg_open,
+                    .release	= proc_reg_release,
+                };
+            ```
+        2.5 打开文件后,需要读写文件,其也就可以调用该接口的read/write接口,参考上述socketfs的dentry_open.
+
+    3. sysfs
+        sys文件系统与proc文件系统一样,通过内核数据结构实例,组织成文件系统,它由kernfs_node结构体实例构成。
+        kernfs文件系统并不是一个完整的文件系统,它只是提供构建文件系统的基础组件及相关的接口函数,使用kernfs文件系统的子系统需要定义并注册文件系统类型file_system_type实例。其过程与procfs文件基本类似就不单独介绍。
+}
+
+;{    NETFILTER
+    1. ebfilter
+        1.1 挂载点
+            // 文件:include/linux/netfilter_ipv4.h
+            #define NF_IP_PRE_ROUTING   0
+            #define NF_IP_LOCAL_IN      1
+            #define NF_IP_FORWARD       2
+            #define NF_IP_LOCAL_OUT     3
+            #define NF_IP_POST_ROUTING  4
+
+        1.2 NF_HOOK宏
+            static inline int nf_hook_thresh(int pf, unsigned int hook,
+				 struct sk_buff *skb,
+				 struct net_device *indev,
+				 struct net_device *outdev,
+				 int (*okfn)(struct sk_buff *), int thresh,
+				 int cond)
+                {
+                    if (!cond)
+                        return 1;
+                #ifndef CONFIG_NETFILTER_DEBUG
+                    if (list_empty(&nf_hooks[pf][hook]))
+                        return 1;
+                #endif
+                    return nf_hook_slow(pf, hook, skb, indev, outdev, okfn, thresh);
+                }
+
+            #define NF_HOOK_THRESH(pf, hook, skb, indev, outdev, okfn, thresh)	       \
+                ({int __ret;								       \
+                if ((__ret=nf_hook_thresh(pf, hook, (skb), indev, outdev, okfn, thresh, 1)) == 1)\
+                    __ret = (okfn)(skb);						       \
+                __ret;})
+
+            #define NF_HOOK(pf, hook, skb, indev, outdev, okfn) \
+                    NF_HOOK_THRESH(pf, hook, skb, indev, outdev, okfn, INT_MIN)
+
+            /*    如果nf_hooks[pf][hook]所指向的链表为空（即该钩子上没有挂处理函数）,则直接调用okfn;否则,则调用net/core/netfilter.c::nf_hook_slow()转入Netfilter的处理。  */
+
+        1.3 br_handle_frame
+            br_handle_frame 主要有两个分支有NF_HOOK的调用的,如下: 
+            |---link-local----      NF_HOOK(NFPROTO_BRIDGE,NF_BR_LOCAL_IN,..,br_handle_local_finish) 
+            |---forward--          NF_HOOK(NFPROTO_BRIDGE, NF_BR_PRE_ROUTING, ...,br_handle_frame_finish)
+            link-local :如果目的mac是本地链路地址,则会调用br_handle_local_finish
+
+            1.3.1 br_handle_local_finish
+                //根据报文的源MAC来更新FDB表项
+                if (NF_HOOK(PF_BRIDGE, NF_BR_LOCAL_IN, skb, skb->dev,
+                        NULL, br_handle_local_finish))
+                -> br_fdb_update(p->br, p, eth_hdr(skb)->h_source);
+
+            1.3.2 br_handle_frame_finish
+                    -> br_fdb_update
+                    -> br_pass_frame_up
+                    -> br_forward
+                    -> br_flood_forward
+
+                    br_handle_frame_finish 这个函数对数据包的dmac进行判断,然后走不同的处理函数 。
+                    A.bridge it,如果dmac是在网桥的别的端口,复制一份帧到dmac所在的端口---->br_forward 
+                    B.flood it over all the forwarding bridge ports,如果dmac地址是网桥不知道的,就泛 ---->br_flood_forward
+                    C.pass it to the higher protocol code,如果dmac是网桥的,或者网桥其中一个端口的---->br_pass_frame_up
+                    D.ignore it,dmac在进来的端口的这一边的,即dmac能在进来端口的mac地址表中找到---->br_forward
+                    总之数据包发送有两个地方,一个是转发出去br_forward或者br_flood_forward,一个是发往本地br_pass_frame_up。
+
+                ```
+                switch (p->state) 
+                    case BR_STATE_FORWARDING:
+                        rhook = rcu_dereference(br_should_route_hook);
+                        if (rhook != NULL) {
+                            if (rhook(skb))
+                                return skb;
+                            dest = eth_hdr(skb)->h_dest;
+                        }
+                        /* fall through */
+                    case BR_STATE_LEARNING:
+                        if (!compare_ether_addr(p->br->dev->dev_addr, dest))
+                            skb->pkt_type = PACKET_HOST;
+
+                        NF_HOOK(PF_BRIDGE, NF_BR_PRE_ROUTING, skb, skb->dev, NULL,
+                            br_handle_frame_finish);
+                        break;
+                ```
+
+                1.3.2.1 br_forward
+                    -> __br_forward(to, skb);
+                        -> 	NF_HOOK(PF_BRIDGE, NF_BR_FORWARD, skb, indev, skb->dev,
+                                br_forward_finish);
+                                -> NF_HOOK(PF_BRIDGE, NF_BR_POST_ROUTING, skb, NULL, skb->dev,
+                                    br_dev_queue_push_xmit);
+                                        -> dev_queue_xmit(skb); // 把报文发出去
+                    ```
+                        if (should_deliver(to, skb)) 
+                            __br_forward(to, skb);
+                    ```
+
+                1.3.2.2 br_pass_frame_up
+                    -> NF_HOOK(PF_BRIDGE, NF_BR_LOCAL_IN, skb, indev, NULL,
+		                netif_receive_skb); // 接着还是回到netif_receive_skb函数起始的地方.
+                        ```
+                            indev = skb->dev;
+	                        skb->dev = br->dev; // 不过这里的dev被修改成br-lan下挂的设备eth,重新走一趟
+                        ```
+
+    2. ipfilter
+        0. inet_add_protocol初始化inet_protos
+            inet_init(void)
+                -> inet_add_protocol
+                    -> inet_protos[hash] = prot;
+                ```
+                    if (inet_add_protocol(&icmp_protocol, IPPROTO_ICMP) < 0)
+                        printk(KERN_CRIT "inet_init: Cannot add ICMP protocol\n");
+                    if (inet_add_protocol(&udp_protocol, IPPROTO_UDP) < 0)
+                        printk(KERN_CRIT "inet_init: Cannot add UDP protocol\n");
+                    if (inet_add_protocol(&tcp_protocol, IPPROTO_TCP) < 0)
+                        printk(KERN_CRIT "inet_init: Cannot add TCP protocol\n");
+                        static struct net_protocol tcp_protocol = {
+                            .handler =	tcp_v4_rcv,
+                            .err_handler =	tcp_v4_err,
+                            .gso_send_check = tcp_v4_gso_send_check,
+                            .gso_segment =	tcp_tso_segment,
+                            .no_policy =	1,
+                        };
+                #ifdef CONFIG_IP_MULTICAST
+                    if (inet_add_protocol(&igmp_protocol, IPPROTO_IGMP) < 0)
+                        printk(KERN_CRIT "inet_init: Cannot add IGMP protocol\n");
+                #endif
+                ```
+
+        1. ip_rcv
+            大体流程:
+                1. 丢弃PACKET_OTHERHOST类型的包
+                    1. dmac不是本主机且没有被bridge消耗
+                    2. 携带vlan且没有对应的vlan子接口,没有被bridge消耗
+                    3. 其他:
+                2. 以最小长度获取ip头,校验版本和头部长度
+                3. 以ip头携带的头部长度获取ip头,校验skb长度、ip头长度以及ip包总长度
+                4. 通过iptables的PRE_ROUTING链,继续则进入ip_rcv_finish
+            -> NF_HOOK(PF_INET, NF_IP_PRE_ROUTING, skb, dev, NULL,
+		       ip_rcv_finish);
+                -> ip_route_input(skb, iph->daddr, iph->saddr, iph->tos, skb->dev);
+                    -> ip_route_input_slow
+                        初始化入口流量的函数指针:入口IP流量是由ip_rcv_finish处理,该函数参照路由表来决定将封包送往本地还是丢弃。在路由缓存不命中的情况下,ip_route_input_slow可以创建以下三种dst->input和dst->output的组合:
+                            1. 当封包被转发时,函数将dst->input初始化为ip_forward,将dst->output初始化为ip_output。所以dst_output将调用ip_forward,而在ip_forward的结尾处间接调用dst_output,即ip_output
+                            2. 如果封包被送往本地,函数将dst->input初始化为ip_local_deliver,此时不需要初始化dst->output,但它还是被初始化为ip_rt_error,用于检测在处理送往本地封包的dst->ouput是否被错误调用
+                            3. 如果根据路由表得出目的地址不可达,dst->input被初始化为ip_error,这将产生一个ICMP消息,消息类型依赖于路由查找返回的准确结果,因为ip_error将skb缓冲区释放,所以不需要初始化dst->output,因为即使在犯错情况下它也不会被调用
+
+                        -> local_input: rth->u.dst.input= ip_local_deliver;
+                                        rth->u.dst.output= ip_rt_bug;
+                        -> forward: 
+                            __mkroute_input
+                                -> rth->u.dst.input = ip_forward;
+                                   rth->u.dst.output = ip_output;
+                -> dst_input
+                    -> skb->dst->input(skb);    //该函数确定了下一步对数据包的处理,根据数据包的目的地地址,skb->dst->input字段的信息主要由路由处理流程确定,可能是往本地协议栈上传就调用 ip_local_deliver,如果是转发就调用ip_forward */
+                        -> local_input:
+                            ip_local_deliver
+                                -> NF_HOOK(PF_INET, NF_IP_LOCAL_IN, skb, skb->dev, NULL,
+                                    ip_local_deliver_finish);
+                                    -> if ((ipprot = rcu_dereference(inet_protos[hash])) != NULL) 
+                                            ret = ipprot->handler(skb); // 比如tcp的tcp_v4_rcv
+                                            -> tcp_v4_rcv
+                                                -> tcp_v4_do_rcv
+                                                    -> tcp_rcv_state_process
+                                                        -> tcp_data_queue
+                                                            -> __skb_queue_tail(&sk->sk_receive_queue, skb);
+                        ```
+                            tcp_v4_connect
+                                -> ip_route_connect
+                                    -> __ip_route_output_key
+                                        -> ip_route_output_slow
+                                            -> ip_mkroute_output
+                                                -> rt_intern_hash
+                                                    -> arp_bind_neighbour
+                                                        -> __neigh_lookup_errno
+                                                            -> neigh_create
+                                                                -> if (tbl->constructor && (error = tbl->constructor(n)) 0) 
+
+                            arp_init
+                                -> neigh_table_init(&arp_tbl);
+                                struct neigh_table arp_tbl = {
+                                    .family =	AF_INET,
+                                    .entry_size =	sizeof(struct neighbour) + 4,
+                                    .key_len =	4,
+                                    .hash =		arp_hash,
+                                    .constructor =	arp_constructor,
+                                    ...
+                                }
+
+                                static struct neigh_ops arp_hh_ops = {
+                                    .family =		AF_INET,
+                                    .solicit =		arp_solicit,
+                                    .error_report =		arp_error_report,
+                                    .output =		neigh_resolve_output,
+                                    .connected_output =	neigh_connected_output,
+                                    .hh_output =		dev_queue_xmit,
+                                    .queue_xmit =		dev_queue_xmit,
+                                };
+
+                                static int arp_constructor(struct neighbour *neigh)
+                                {
+                                    if (dev->header_ops->cache)
+                                        neigh->ops = &arp_hh_ops;
+                                    else
+                                        neigh->ops = &arp_generic_ops;
+                                }
+                        ```
+
+                        -> forward:
+                            ip_forward
+                                -> NF_HOOK(PF_INET, NF_IP_FORWARD, skb, skb->dev, rt->u.dst.dev,
+		                                ip_forward_finish)
+                                    -> dst_output
+                                        -> skb->dst->output(skb);
+                                            ip_output
+                                                -> NF_HOOK_COND(PF_INET, NF_IP_POST_ROUTING, skb, NULL, dev,
+			                                        ip_finish_output, !(IPCB(skb)->flags & IPSKB_REROUTED))
+                                                    -> ip_finish_output2
+                                                        -> dst->neighbour->output(skb) // 参考上面arp_hh_ops
+                                                            neigh_resolve_output
+                                                                -> neigh->ops->queue_xmit
+                                                                    dev_queue_xmit // 参考上面arp_hh_ops QOS:TC
+                                                                        -> dev_hard_start_xmit
+}
+ 
+;{  tcp/IP
+    1. inet_init
+        1. 初始化net_families[ops->family] = ops;
+            1. sock_register
+                -> sock_register(&pppox_proto_family);
+                -> (void)sock_register(&inet_family_ops);
+                    ```
+                        static struct net_proto_family inet_family_ops = {
+                            .family = PF_INET,
+                            .create = inet_create,
+                            .owner	= THIS_MODULE,
+                        };
+                    ```
+                -> sock_register(&inet6_family_ops);
+
+        2. 初始化inet_register_protosw
+            inet_init
+            -> for (r = &inetsw[0]; r < &inetsw[SOCK_MAX]; ++r)
+		            INIT_LIST_HEAD(r);
+            -> for (q = inetsw_array; q < &inetsw_array[INETSW_ARRAY_LEN]; ++q)
+		            inet_register_protosw(q);
+                        ```
+                            last_perm = &inetsw[p->type];
+                            list_add_rcu(&p->list, last_perm); // 将p->list挂在last_perm下面,即将inetsw_array挂在inetsw下面
+                        ```
+            ```
+                static struct inet_protosw inetsw_array[] =
+                {
+                    {
+                        .type =       SOCK_STREAM,
+                        .protocol =   IPPROTO_TCP,
+                        .prot =       &tcp_prot,
+                        .ops =        &inet_stream_ops,
+                        .capability = -1,
+                        .no_check =   0,
+                        .flags =      INET_PROTOSW_PERMANENT |
+                                INET_PROTOSW_ICSK,
+                    },
+                    {
+                        .type =       SOCK_DGRAM,
+                        .protocol =   IPPROTO_UDP,
+                        .prot =       &udp_prot,
+                        .ops =        &inet_dgram_ops,
+                        .capability = -1,
+                        .no_check =   UDP_CSUM_DEFAULT,
+                        .flags =      INET_PROTOSW_PERMANENT,
+                    },
+                    {
+                        .type =       SOCK_RAW,
+                        .protocol =   IPPROTO_IP,	/* wild card */
+                        .prot =       &raw_prot,
+                        .ops =        &inet_sockraw_ops,
+                        .capability = CAP_NET_RAW,
+                        .no_check =   UDP_CSUM_DEFAULT,
+                        .flags =      INET_PROTOSW_REUSE,
+                    }
+                };
+            ```
+
+        2. sys_socket(int family, int type, int protocol) // 使用前面初始化的初始化net_families
+            -> sock_create(family, type, protocol, &sock);
+                -> pf = rcu_dereference(net_families[family]);
+                -> err = pf->create(net, sock, protocol); // net_families[ops->family].create, 比如ipv4 inet_create
+                    -> inet_create
+                        ```
+                        	list_for_each_rcu(p, &inetsw[sock->type]) 
+                            answer = list_entry(p, struct inet_protosw, list);
+                                if (protocol == answer->protocol) 
+                        ```
+                        -> sock->ops = answer->ops; // inetsw_array中的inet_stream_ops
+
+        3. sys_sendmsg
+            -> sock->ops->sendmsg
+                -> inet_stream_ops->sendmsg
+                    tcp_sendmsg
+
+        4. sys_read
+            -> vfs_read
+                -> do_sync_read
+                    -> ret = filp->f_op->aio_read(&kiocb, &iov, 1, kiocb.ki_pos); //socket_file_ops
+                        -> socket_file_ops->aio_read
+                            -> do_sock_read
+                                -> __sock_recvmsg
+                                    -> sock->ops = answer->ops; // inetsw_array中的inet_stream_ops
+                                        -> sock_common_recvmsg
+                                            -> sk->sk_prot->recvmsg // inetsw_array中的inet_stream_ops的tcp_prot
+                                                -> tcp_recvmsg
+                                                    ```
+                                                        skb = skb_peek(&sk->sk_receive_queue); //前面tcp_rcv收到的数据
+                                                        err = skb_copy_datagram_iovec(skb, offset, msg->msg_iov, used); // 拷贝数据到应用层
+                                                    ```
+
 }

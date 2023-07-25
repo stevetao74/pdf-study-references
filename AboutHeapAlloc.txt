@@ -1,3 +1,26 @@
+-2. LDT/GDT
+    段描述符
+    一个段描述符有 64 位 8 字节数据,里面包含了段基地址,段长度,段权限,段类型(可以是系统段,代码段,数据段),段是否可读写,可执行等.虽然数据分布有点乱,这是由于历史原因造成的
+    多个段描述符构成GDT/LDT
+
+-1. 中断
+    硬件中断：中断控制器发出
+    软件中断：汇编代码INT命令
+    中断寄存器IDTR:记录了内存中中断表的地址和长度
+    中断向量表：这是由BIOS设置的
+
+0. 内核对物理页面和用户空间的管理
+    // windows内核情景
+    PspCreateProcess
+        MmCreateProcessAddressSpace
+            MmRequestPageMemoryConsumer 
+                MmAllocPage // 分配物理页面
+
+    MmInitializeMemoryConsumer(MC_USER, MmTrimUserMemory);
+        MmTrimUserMemory
+            MmPageOutPhysicalAddress
+                MmCreateVirtualMapping // 创建虚拟到物理的映射
+
 typedef struct tagHEAP
 {
     DWORD_PTR        unknown1[2];
