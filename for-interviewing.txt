@@ -3493,10 +3493,10 @@
 	1. pthread_cond_wait
 	    -> suspend_with_cancellation(self);
 		-> sigsetjmp(jmpbuf, 0) == 0
-		-> while (self->p_signal != PTHREAD_SIG_RESTART) sigsuspend(&mask);
+		-> while (self->p_signal != PTHREAD_SIG_RESTART) sigsuspend(&mask);// 收到下面的kill时，就不会进去suspend
 		    -> current->state = TASK_INTERRUPTIBLE;
 		    -> schedule
-			-> if (state == TASK_INTERRUPTIBLE) if (signal_pending(prev)) state = TASK_RUNNING; // 收到下面的kill时，就会让进程变成RUANNING
+			-> if (state == TASK_INTERRUPTIBLE) if (signal_pending(prev)) state = TASK_RUNNING; 
 			-> switch_to
 
 	2. pthread_cond_signal
