@@ -3088,6 +3088,12 @@
                     ->proc_tty_init()
                         -> entry->proc_fops = &proc_tty_drivers_operations;
 
+                    -> struct vfsmount *proc_mnt = kern_mount(&sock_fs_type);
+                        -> struct super_block *sb = read_super(dev, NULL, type, 0, NULL, 0);
+                            -> struct super_block * s = get_empty_super();
+                                -> type->read_super(s, data, silent) // proc_read_super
+                                    -> s->s_op = &proc_sops;
+
         2.2 挂载文件系统(/proc根目录)
             mount -t proc proc /proc
             ->.get_sb		= proc_get_sb
@@ -3394,129 +3400,118 @@
                                                                     dev_queue_xmit // 参考上面arp_hh_ops QOS:TC
                                                                         -> dev_hard_start_xmit
 }
- 
+
 ;{  tcp/IP
-    1. inet_init
-        1. 初始化net_families[ops->family] = ops;
-            1. sock_register
-                -> sock_register(&pppox_proto_family);
-                -> (void)sock_register(&inet_family_ops);
-                    ```
-                        static struct net_proto_family inet_family_ops = {
-                            .family = PF_INET,
-                            .create = inet_create,
-                            .owner	= THIS_MODULE,
-                        };
-                    ```
-                -> sock_register(&inet6_family_ops);
+    · inet_init //ipv4 init
+        -> (void) sock_register(&inet_family_ops);
+            -> (void)sock_register(&inet_family_ops);
+                -> net_families[ops->family]=ops
+    · inet6_init // ipv6 init
+        -> (void) sock_register(&inet6_family_ops);
+            -> net_families[ops->family]=ops
 
-        2. 初始化inet_register_protosw
-            inet_init
-            -> for (r = &inetsw[0]; r < &inetsw[SOCK_MAX]; ++r)
-		            INIT_LIST_HEAD(r);
-            -> for (q = inetsw_array; q < &inetsw_array[INETSW_ARRAY_LEN]; ++q)
-		            inet_register_protosw(q);
-                        ```
-                            last_perm = &inetsw[p->type];
-                            list_add_rcu(&p->list, last_perm); // 将p->list挂在last_perm下面,即将inetsw_array挂在inetsw下面
-                        ```
-            ```
-                static struct inet_protosw inetsw_array[] =
-                {
-                    {
-                        .type =       SOCK_STREAM,
-                        .protocol =   IPPROTO_TCP,
-                        .prot =       &tcp_prot,
-                        .ops =        &inet_stream_ops,
-                        .capability = -1,
-                        .no_check =   0,
-                        .flags =      INET_PROTOSW_PERMANENT |
-                                INET_PROTOSW_ICSK,
-                    },
-                    {
-                        .type =       SOCK_DGRAM,
-                        .protocol =   IPPROTO_UDP,
-                        .prot =       &udp_prot,
-                        .ops =        &inet_dgram_ops,
-                        .capability = -1,
-                        .no_check =   UDP_CSUM_DEFAULT,
-                        .flags =      INET_PROTOSW_PERMANENT,
-                    },
-                    {
-                        .type =       SOCK_RAW,
-                        .protocol =   IPPROTO_IP,	/* wild card */
-                        .prot =       &raw_prot,
-                        .ops =        &inet_sockraw_ops,
-                        .capability = CAP_NET_RAW,
-                        .no_check =   UDP_CSUM_DEFAULT,
-                        .flags =      INET_PROTOSW_REUSE,
-                    }
-                };
-            ```
+    · sock_init(void) // create superblock, vfsmount of sock_fs_type
+        -> register_filesystem(&sock_fs_type); // static DECLARE_FSTYPE(sock_fs_type, "sockfs", sockfs_read_super,	FS_NOMOUNT|FS_SINGLE);
+        ```static struct vfsmount *sock_mnt;```
+        -> sock_mnt = kern_mount(&sock_fs_type);
+            -> struct super_block *sb = read_super(dev, NULL, type, 0, NULL, 0);
+                -> struct super_block * s = get_empty_super();
+                -> type->read_super(s, data, silent) // sockfs_read_super
+                    -> struct inode *root = new_inode(sb);
+                    -> sb->s_op	= &sockfs_ops; //super_operations
+                    -> sb->s_root = d_alloc(NULL, &(const struct qstr) { "socket:", 7, 0 }); // struct dentry *
+                    -> sb->s_root->d_sb = sb;
+            -> mnt = add_vfsmnt(NULL, sb->s_root, NULL);
+                -> struct super_block *sb = root->d_inode->i_sb;
+                -> struct vfsmount *mnt = kmalloc(sizeof(struct vfsmount), GFP_KERNEL);
+                -> mnt->mnt_sb = sb;
+            -> type->kern_mnt = mnt;
 
-        2. sys_socket(int family, int type, int protocol) // 使用前面初始化的初始化net_families
-	    -> struct socket *sock = sock_alloc();
-		-> struct inode * inode = get_empty_inode();
-		   -> struct inode * inode = alloc_inode(); // inode->u 里携带struct socket内存 kmem_cache_alloc(inode_cachep, SLAB_KERNEL))
-		-> inode->i_sb = sock_mnt->mnt_sb;
-		-> struct socket *sock = socki_lookup(inode);
-		  -> return &inode->u.socket_i;
+    · sys_socket(int family, int type, int protocol) // create inode of socket, init sock of tcp/udp
+        -> struct socket *sock;
+            retval = sock_create(family, type, protocol, &sock);
+            -> struct socket *sock = sock_alloc();
+                -> struct inode * inode = get_empty_inode();
+                    -> struct inode * inode = alloc_inode(); // inode->u 里携带struct socket内存 
+                        -> kmem_cache_alloc(inode_cachep, SLAB_KERNEL))
+                -> inode->i_sb = sock_mnt->mnt_sb;
+                -> struct socket *sock = socki_lookup(inode);
+                    -> return &inode->u.socket_i;
+                -> sock->inode = inode;
 
-            -> sock_create(family, type, protocol, &sock);
-                -> pf = rcu_dereference(net_families[family]);
-                -> err = pf->create(net, sock, protocol); // net_families[ops->family].create, 比如ipv4 inet_create
-                    -> inet_create
-			-> struct sock *sk = sk_alloc(PF_INET, GFP_KERNEL, 1);
-			  -> struct sock *sk = kmem_cache_alloc(sk_cachep, priority);
-			  -> 	case SOCK_STREAM:
-					if (protocol && protocol != IPPROTO_TCP)
-						goto free_and_noproto;
-					protocol = IPPROTO_TCP;
-					prot = &tcp_prot;
-					sock->ops = &inet_stream_ops;
-				break;
-				case SOCK_DGRAM:
-					if (protocol && protocol != IPPROTO_UDP)
-						goto free_and_noproto;
-					protocol = IPPROTO_UDP;
-					sk->no_check = UDP_CSUM_DEFAULT;
-					prot=&udp_prot;
-					sock->ops = &inet_dgram_ops;
-				break;
-			-> sock_init_data(sock,sk);
-			  -> 	skb_queue_head_init(&sk->receive_queue);
-				skb_queue_head_init(&sk->write_queue);
-			  -> sk->socket	= sock;
-			-> sk->prot->init(sk); // tcp_prot->init == tcp_v4_init_sock
-			  -> tcp_init_xmit_timers(sk);
-			    -> init_timer(&tp->retransmit_timer);
-			       tp->retransmit_timer.function=&tcp_write_timer;
-			    -> init_timer(&tp->delack_timer);
-				tp->delack_timer.function=&tcp_delack_timer;
-			    -> init_timer(&sk->timer);
-				sk->timer.function=&tcp_keepalive_timer;
-			  -> tp->snd_cwnd = 2; sk->state = TCP_CLOSE;
+            -> net_families[family]->create(sock, protocol))
+                -> struct sock *sk = sk_alloc(PF_INET, GFP_KERNEL, 1);
+                    -> struct sock *sk = kmem_cache_alloc(sk_cachep, priority);
+                -> case SOCK_STREAM:
+                        if (protocol && protocol != IPPROTO_TCP)
+                            goto free_and_noproto;
+                        protocol = IPPROTO_TCP;
+                        prot = &tcp_prot; // sock init tcp
+                        sock->ops = &inet_stream_ops;
+                    break;
+                    case SOCK_DGRAM:
+                        if (protocol && protocol != IPPROTO_UDP)
+                            goto free_and_noproto;
+                        protocol = IPPROTO_UDP;
+                        sk->no_check = UDP_CSUM_DEFAULT;
+                        prot=&udp_prot;
+                        sock->ops = &inet_dgram_ops;
+                    break;
+                -> sock_init_data(sock,sk);
+                    -> 	skb_queue_head_init(&sk->receive_queue);
+                        skb_queue_head_init(&sk->write_queue);
+                    -> sk->socket	= sock;
+                        sock->sk	=	sk;
+                -> sk->prot->init(sk); // tcp_prot->init == tcp_v4_init_sock
+                    -> tcp_init_xmit_timers(sk);
+                        -> init_timer(&tp->retransmit_timer);
+                            tp->retransmit_timer.function=&tcp_write_timer;
+                            init_timer(&tp->delack_timer);
+                            tp->delack_timer.function=&tcp_delack_timer;
+                            init_timer(&sk->timer);
+                            sk->timer.function=&tcp_keepalive_timer;
+                    -> tp->snd_cwnd = 2; sk->state = TCP_CLOSE;
 
-        3. sys_sendmsg
-            -> sock->ops->sendmsg
-                -> inet_stream_ops->sendmsg
-                    tcp_sendmsg
+        -> retval = sock_map_fd(sock); // add inode of socket to process.
+            -> int fd = get_unused_fd();
+                -> struct files_struct * files = current->files;
+                    fd = find_next_zero_bit(files->open_fds, files->max_fdset, files->next_fd);
+                    FD_SET(fd, files->open_fds);
+                    FD_CLR(fd, files->close_on_exec);
+            -> struct file *file = get_empty_filp();
+                struct qstr this;
+                file->f_dentry = d_alloc(sock_mnt->mnt_sb->s_root, &this);
+                    -> struct dentry *dentry = kmem_cache_alloc(dentry_cache, GFP_KERNEL); 
+                file->f_dentry->d_op = &sockfs_dentry_operations;
+                d_add(file->f_dentry, sock->inode);
+                    -> d_instantiate(entry, inode);
+                        -> entry->d_inode = inode;
+                file->f_vfsmnt = mntget(sock_mnt);
+                sock->file = file;
+                file->f_op = sock->inode->i_fop = &socket_file_ops;
+                fd_install(fd, file);
+                    -> files->fd[fd] = file;
 
-        4. sys_read
-            -> vfs_read
-                -> do_sync_read
-                    -> ret = filp->f_op->aio_read(&kiocb, &iov, 1, kiocb.ki_pos); //socket_file_ops
-                        -> socket_file_ops->aio_read
-                            -> do_sock_read
-                                -> __sock_recvmsg
-                                    -> sock->ops = answer->ops; // inetsw_array中的inet_stream_ops
-                                        -> sock_common_recvmsg
-                                            -> sk->sk_prot->recvmsg // inetsw_array中的inet_stream_ops的tcp_prot
-                                                -> tcp_recvmsg
-                                                    ```
-                                                        skb = skb_peek(&sk->sk_receive_queue); //前面tcp_rcv收到的数据
-                                                        err = skb_copy_datagram_iovec(skb, offset, msg->msg_iov, used); // 拷贝数据到应用层
-                                                    ```
+    3. sys_sendmsg
+        -> sock->ops->sendmsg
+            -> inet_stream_ops->sendmsg
+                tcp_sendmsg
+
+    4. sys_read
+        -> vfs_read
+            -> do_sync_read
+                -> ret = filp->f_op->aio_read(&kiocb, &iov, 1, kiocb.ki_pos); //socket_file_ops
+                    -> socket_file_ops->aio_read
+                        -> do_sock_read
+                            -> __sock_recvmsg
+                                -> sock->ops = answer->ops; // inetsw_array中的inet_stream_ops
+                                    -> sock_common_recvmsg
+                                        -> sk->sk_prot->recvmsg // inetsw_array中的inet_stream_ops的tcp_prot
+                                            -> tcp_recvmsg
+                                                ```
+                                                    skb = skb_peek(&sk->sk_receive_queue); //前面tcp_rcv收到的数据
+                                                    err = skb_copy_datagram_iovec(skb, offset, msg->msg_iov, used); // 拷贝数据到应用层
+                                                ```
 
 }
 
