@@ -3455,16 +3455,47 @@
             ```
 
         2. sys_socket(int family, int type, int protocol) // 使用前面初始化的初始化net_families
+	    -> struct socket *sock = sock_alloc();
+		-> struct inode * inode = get_empty_inode();
+		   -> struct inode * inode = alloc_inode(); // inode->u 里携带struct socket内存 kmem_cache_alloc(inode_cachep, SLAB_KERNEL))
+		-> inode->i_sb = sock_mnt->mnt_sb;
+		-> struct socket *sock = socki_lookup(inode);
+		  -> return &inode->u.socket_i;
+
             -> sock_create(family, type, protocol, &sock);
                 -> pf = rcu_dereference(net_families[family]);
                 -> err = pf->create(net, sock, protocol); // net_families[ops->family].create, 比如ipv4 inet_create
                     -> inet_create
-                        ```
-                        	list_for_each_rcu(p, &inetsw[sock->type]) 
-                            answer = list_entry(p, struct inet_protosw, list);
-                                if (protocol == answer->protocol) 
-                        ```
-                        -> sock->ops = answer->ops; // inetsw_array中的inet_stream_ops
+			-> struct sock *sk = sk_alloc(PF_INET, GFP_KERNEL, 1);
+			  -> struct sock *sk = kmem_cache_alloc(sk_cachep, priority);
+			  -> 	case SOCK_STREAM:
+					if (protocol && protocol != IPPROTO_TCP)
+						goto free_and_noproto;
+					protocol = IPPROTO_TCP;
+					prot = &tcp_prot;
+					sock->ops = &inet_stream_ops;
+				break;
+				case SOCK_DGRAM:
+					if (protocol && protocol != IPPROTO_UDP)
+						goto free_and_noproto;
+					protocol = IPPROTO_UDP;
+					sk->no_check = UDP_CSUM_DEFAULT;
+					prot=&udp_prot;
+					sock->ops = &inet_dgram_ops;
+				break;
+			-> sock_init_data(sock,sk);
+			  -> 	skb_queue_head_init(&sk->receive_queue);
+				skb_queue_head_init(&sk->write_queue);
+			  -> sk->socket	= sock;
+			-> sk->prot->init(sk); // tcp_prot->init == tcp_v4_init_sock
+			  -> tcp_init_xmit_timers(sk);
+			    -> init_timer(&tp->retransmit_timer);
+			       tp->retransmit_timer.function=&tcp_write_timer;
+			    -> init_timer(&tp->delack_timer);
+				tp->delack_timer.function=&tcp_delack_timer;
+			    -> init_timer(&sk->timer);
+				sk->timer.function=&tcp_keepalive_timer;
+			  -> tp->snd_cwnd = 2; sk->state = TCP_CLOSE;
 
         3. sys_sendmsg
             -> sock->ops->sendmsg
