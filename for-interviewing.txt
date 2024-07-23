@@ -3533,3 +3533,29 @@
 			-> send_sig
 			    -> p->p_signal  |= (1<<(sig-1)) // 发送TASK_INTERRUPTIBLE到指定线程
 }
+
+;{
+	ip_mc_join_group(struct sock *sk , struct ip_mreqn *imr)
+		-> struct ip_mc_socklist *iml = (struct ip_mc_socklist *)sock_kmalloc(sk, sizeof(*iml), GFP_KERNEL);
+			memcpy(&iml->multi, imr, sizeof(*imr));
+			iml->next = sk->protinfo.af_inet.mc_list;
+			sk->protinfo.af_inet.mc_list = iml;
+			u32 addr = imr->imr_multiaddr.s_addr;
+		-> ip_mc_inc_group(in_dev, addr);
+			-> struct ip_mc_list *im = (struct ip_mc_list *)kmalloc(sizeof(*im), GFP_KERNEL);
+				im->multiaddr=addr;
+				init_timer(&im->timer);
+				im->timer.function=&igmp_timer_expire;
+				im->next=in_dev->mc_list;
+				im->interface=in_dev;
+				in_dev->mc_list=im;
+			-> igmp_group_added(im);
+				-> ip_mc_filter_add(im->interface, im->multiaddr);
+					-> dev_mc_add(dev,buf,dev->addr_len,0);
+				-> igmp_start_timer(im, IGMP_Initial_Report_Delay); // igmp_timer_expire
+					-> static void igmp_timer_expire(unsigned long data)
+						-> err = igmp_send_report(in_dev->dev, im->multiaddr, IGMP_HOST_MEMBERSHIP_REPORT);
+	
+	
+
+}
